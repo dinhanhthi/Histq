@@ -129,7 +129,9 @@ public actor GitRunner {
         let child = ChildProcess(
             executable: executable, arguments: args, cwd: cwd, environment: env, stdin: stdin, timeout: timeout,
             delimiter: delimiter, onLine: { continuation.yield($0) })
-        continuation.onTermination = { _ in child.stop() }
+        // Not inline: the stream calls this under its own lock while the pipe reader may hold the child's
+        // lock and wait in `yield` for the stream's (lock-order deadlock on cancel).
+        continuation.onTermination = { _ in DispatchQueue.global().async { child.stop() } }
         do {
             try Self.launch(child)
         } catch {
