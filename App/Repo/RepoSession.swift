@@ -1172,20 +1172,35 @@ final class RepoSession: Identifiable {
     /// deletes the file. `path` must stay inside `cwd`: no absolute path, no `..`, no folder that is a symlink out.
     private nonisolated static func writeResolution(_ content: Data?, to path: String, cwd: URL) throws {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !path.isEmpty, !path.hasPrefix("/"), !parts.contains(where: { $0 == ".." || $0 == "." || $0.isEmpty }) else {
+        guard !path.isEmpty, !path.hasPrefix("/"), parts.first != ".git",
+            !parts.contains(where: { $0 == ".." || $0 == "." || $0.isEmpty })
+        else {
             throw ConflictWriteError.outsideRepository(path)
         }
         let file = cwd.appending(path: path, directoryHint: .notDirectory)
-        let root = cwd.resolvingSymlinksInPath().path
-        let folder = file.deletingLastPathComponent().resolvingSymlinksInPath().path
-        guard folder == root || folder.hasPrefix(root + "/") else { throw ConflictWriteError.outsideRepository(path) }
+        // Each parent folder is checked with lstat, from the repo root down, and created when missing: a folder that
+        // is a symlink (planted by an untrusted repo, or not created yet when a resolved path is checked) could
+        // otherwise send the write outside the repository.
+        var folder = cwd
+        for part in parts.dropLast() {
+            folder = folder.appending(path: String(part), directoryHint: .isDirectory)
+            var info = stat()
+            if lstat(folder.path, &info) != 0 {
+                guard errno == ENOENT, mkdir(folder.path, 0o755) == 0 else {
+                    throw ConflictWriteError.outsideRepository(path)
+                }
+            } else if info.st_mode & S_IFMT != S_IFDIR {
+                throw ConflictWriteError.outsideRepository(path)
+            }
+        }
         let fm = FileManager.default
+        // attributesOfItem does not follow a symlink at the file itself; the atomic write and the removal replace or
+        // remove that link, never its target.
         let attributes = try? fm.attributesOfItem(atPath: file.path)
         guard let content else {
             if attributes != nil { try fm.removeItem(at: file) }
             return
         }
-        if attributes == nil { try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true) }
         try content.write(to: file, options: .atomic)
         if attributes?[.type] as? FileAttributeType == .typeRegular, let mode = attributes?[.posixPermissions] {
             try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
