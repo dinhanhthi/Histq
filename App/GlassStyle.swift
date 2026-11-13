@@ -1,4 +1,4 @@
-// The window's look: adaptive dark/light colors, motion, cards, the window glass and small controls.
+// The window's look (dark mode only): colors, motion, cards, the window glass and small controls.
 import AppKit
 import SwiftUI
 
@@ -19,76 +19,93 @@ enum PlatformFeatures {
     }
 }
 
-/// The app colors. Each one has a dark and a light value and follows the window's appearance live.
+/// The app colors. Histq is dark mode only: each token has one value, made for the dark window.
 enum Palette {
-    /// The tint over the window's blur (`WindowGlass`). #1C1C1E / #F5F5F7, both at 0.6.
-    static let windowTint = dynamicNSColor(
-        dark: NSColor(srgbRed: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 0.6),
-        light: NSColor(srgbRed: 245 / 255, green: 245 / 255, blue: 247 / 255, alpha: 0.6))
-    static let hoverFill = dynamic(dark: .white.withAlphaComponent(0.1), light: .black.withAlphaComponent(0.06))
-    static let pressedFill = dynamic(dark: .white.withAlphaComponent(0.2), light: .black.withAlphaComponent(0.12))
+    /// The tint over the window's blur (`WindowGlass`). #1C1C1E at 0.6.
+    static let windowTint = NSColor(srgbRed: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 0.6)
+    static let hoverFill = color(.white.withAlphaComponent(0.1))
+    static let pressedFill = color(.white.withAlphaComponent(0.2))
     /// The selected sidebar row's capsule and its 1 pt edge: neutral, no accent.
-    static let selectedFill = dynamic(dark: .white.withAlphaComponent(0.14), light: .black.withAlphaComponent(0.07))
-    static let selectedBorder = dynamic(dark: .white.withAlphaComponent(0.12), light: .black.withAlphaComponent(0.08))
-    /// The header's tab strip: the track behind the tabs (before macOS 26; Liquid Glass after), the selected tab's
-    /// capsule (with a `selectedBorder` edge), and the hairline between two unselected tabs.
-    static let tabFill = dynamic(dark: .white.withAlphaComponent(0.06), light: .black.withAlphaComponent(0.05))
-    static let selectedTabFill = dynamic(dark: .white.withAlphaComponent(0.14), light: .white)
-    static let tabSeparator = dynamic(dark: .white.withAlphaComponent(0.12), light: .black.withAlphaComponent(0.12))
+    static let selectedFill = color(.white.withAlphaComponent(0.14))
+    static let selectedBorder = color(.white.withAlphaComponent(0.12))
+    /// The header's tab pills: each unselected tab's fill, and the selected tab's (with a `selectedBorder` edge).
+    static let tabFill = color(.white.withAlphaComponent(0.06))
+    static let selectedTabFill = color(.white.withAlphaComponent(0.14))
     /// The capsule bars of a loading placeholder (`SkeletonLine`), on a `surface` card.
-    static let skeletonFill = dynamic(dark: .white.withAlphaComponent(0.10), light: .black.withAlphaComponent(0.08))
+    static let skeletonFill = color(.white.withAlphaComponent(0.10))
     /// Darkens a pressed button over its own fill.
-    static let pressedOverlay = dynamic(dark: .black.withAlphaComponent(0.2), light: .black.withAlphaComponent(0.1))
+    static let pressedOverlay = color(.black.withAlphaComponent(0.2))
     /// Dims the window behind an in-window modal (`SettingsModal`), over the page's light backdrop blur.
-    static let scrim = dynamic(dark: .black.withAlphaComponent(0.45), light: .black.withAlphaComponent(0.28))
-    /// Text and glyphs on the gold accent fill (white on gold is ~1.7:1). #1C1C1E / #1D1D1F
-    static let onAccent = dynamic(
-        dark: NSColor(srgbRed: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 1),
-        light: NSColor(srgbRed: 29 / 255, green: 29 / 255, blue: 31 / 255, alpha: 1))
-    static let switchOffFill = dynamic(dark: .white.withAlphaComponent(0.22), light: .black.withAlphaComponent(0.15))
-    /// The shadow of the switch's white knob, the same in both modes.
+    static let scrim = color(.black.withAlphaComponent(0.45))
+    /// Text and glyphs on the gold accent fill: primary buttons, the selected tab (user decision 2026-11-13: white).
+    static let onAccent = color(.white)
+    static let switchOffFill = color(.white.withAlphaComponent(0.22))
+    /// The shadow of the switch's white knob.
     static let knobShadow = Color.black.opacity(0.2)
-    /// Cards and panels, a step above the window. #2C2C2E / #FFFFFF
-    static let surface = dynamic(
-        dark: NSColor(srgbRed: 44 / 255, green: 44 / 255, blue: 46 / 255, alpha: 1),
-        light: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-    /// Controls on a card, a step above `surface`. #3A3A3C / #EBEBED
-    static let inputSurface = dynamic(
-        dark: NSColor(srgbRed: 58 / 255, green: 58 / 255, blue: 60 / 255, alpha: 1),
-        light: NSColor(srgbRed: 235 / 255, green: 235 / 255, blue: 237 / 255, alpha: 1))
+    /// Cards and panels, a step above the window. #2C2C2E
+    static let surface = color(srgb(0x2C2C2E))
+    /// Controls on a card, a step above `surface`. #3A3A3C
+    static let inputSurface = color(srgb(0x3A3A3C))
     /// The 1 pt edge of cards and panels.
-    static let surfaceBorder = dynamic(dark: .white.withAlphaComponent(0.08), light: .black.withAlphaComponent(0.08))
+    static let surfaceBorder = color(.white.withAlphaComponent(0.08))
     /// The edge of a raised card: bright at the top, dim on the sides, a faint highlight at the bottom.
     static let raisedRim = LinearGradient(
         stops: [
-            .init(color: dynamic(dark: .white.withAlphaComponent(0.24), light: .black.withAlphaComponent(0.10)),
-                  location: 0),
-            .init(color: dynamic(dark: .white.withAlphaComponent(0.05), light: .black.withAlphaComponent(0.05)),
-                  location: 0.45),
-            .init(color: dynamic(dark: .white.withAlphaComponent(0.10), light: .black.withAlphaComponent(0.12)),
-                  location: 1),
+            .init(color: color(.white.withAlphaComponent(0.24)), location: 0),
+            .init(color: color(.white.withAlphaComponent(0.05)), location: 0.45),
+            .init(color: color(.white.withAlphaComponent(0.10)), location: 1),
         ],
         startPoint: .top, endPoint: .bottom)
     /// The light at the top of a raised button's fallback capsule.
     static let buttonSheen = LinearGradient(
-        colors: [dynamic(dark: .white.withAlphaComponent(0.08), light: .white.withAlphaComponent(0.6)), .clear],
+        colors: [color(.white.withAlphaComponent(0.08)), .clear],
         startPoint: .top, endPoint: .center)
-    /// The light at the top of a raised card; none in light mode.
+    /// The light at the top of a raised card.
     static let cardSheen = LinearGradient(
-        colors: [dynamic(dark: .white.withAlphaComponent(0.05), light: .clear), .clear],
+        colors: [color(.white.withAlphaComponent(0.05)), .clear],
         startPoint: .top, endPoint: .center)
     /// The shadow under a raised card (radius 6, y 3).
-    static let cardShadow = dynamic(dark: .black.withAlphaComponent(0.35), light: .black.withAlphaComponent(0.10))
+    static let cardShadow = color(.black.withAlphaComponent(0.35))
     /// The shadow under a raised button's fallback capsule (radius 3, y 1.5).
-    static let buttonShadow = dynamic(dark: .black.withAlphaComponent(0.35), light: .black.withAlphaComponent(0.12))
+    static let buttonShadow = color(.black.withAlphaComponent(0.35))
 
-    /// A color that resolves to `dark` under a dark appearance and to `light` otherwise.
-    private static func dynamic(dark: NSColor, light: NSColor) -> Color {
-        Color(nsColor: dynamicNSColor(dark: dark, light: light))
+    // MARK: Commit graph (AppKit: the graph draws in `draw(_:)`, so these are `NSColor`s)
+
+    /// The 8 lane colors, in palette order (`GraphRow.color`): gold (the accent's family), teal, blue, purple, magenta,
+    /// green, coral, lime; neighbours differ in hue so adjacent lanes stay apart, all bright on `surface` #2C2C2E.
+    /// #F2B630 #4FB8D6 #5E8EF0 #AC74E8 #E260B0 #5CC98A #F07F5C #C2CF4A
+    private static let laneValues: [NSColor] = [
+        srgb(0xF2B630), srgb(0x4FB8D6), srgb(0x5E8EF0), srgb(0xAC74E8),
+        srgb(0xE260B0), srgb(0x5CC98A), srgb(0xF07F5C), srgb(0xC2CF4A),
+    ]
+    /// The graph's lane colors (`GraphLayout.colorCount` of them): lines, nodes, the badge connectors.
+    static let graphLanes: [NSColor] = laneValues
+    /// The faint band from a node to the graph column's edge: its lane color at 0.16.
+    static let graphLaneBands: [NSColor] = laneValues.map { $0.withAlphaComponent(0.16) }
+    /// A branch badge's fill: its row's lane color at 0.38.
+    static let graphBadgeFills: [NSColor] = laneValues.map { $0.withAlphaComponent(0.38) }
+    /// Text and icons on a badge. White 0.92
+    static let graphBadgeText = NSColor.white.withAlphaComponent(0.92)
+    /// A tag badge's neutral fill. White 0.14
+    static let graphTagFill = NSColor.white.withAlphaComponent(0.14)
+    /// Initials on a node, dark on the bright lanes. #1C1C1E
+    static let graphNodeText = srgb(0x1C1C1E)
+    /// The inside of a hollow node (WIP, stash), so the lines under it do not show: the card's `surface`. #2C2C2E
+    static let graphSurface = srgb(0x2C2C2E)
+    /// The selected graph rows: a neutral fill and its 1 pt edge, like `selectedFill` / `selectedBorder`.
+    /// White 0.11 / white 0.10
+    static let graphSelection = NSColor.white.withAlphaComponent(0.11)
+    static let graphSelectionBorder = NSColor.white.withAlphaComponent(0.10)
+
+    /// An opaque sRGB color from `0xRRGGBB`.
+    private static func srgb(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
     }
 
-    private static func dynamicNSColor(dark: NSColor, light: NSColor) -> NSColor {
-        NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light }
+    /// A SwiftUI color of `value`.
+    private static func color(_ value: NSColor) -> Color {
+        Color(nsColor: value)
     }
 }
 
@@ -238,7 +255,7 @@ struct RowIconButtonStyle: ButtonStyle {
 
 /// A row of a settings sidebar: the selected row is a neutral capsule (`Palette.selectedFill`) with a 1 pt
 /// `Palette.selectedBorder` edge and full-strength title and icon; the others have secondary title and icon and get a
-/// hover capsule (in light mode also full-strength title and icon, as secondary text is faint on the hover fill). Rows sit in a `VStack(spacing: SidebarItemStyle.spacing)` instead of a `List(.sidebar)`, whose
+/// hover capsule. Rows sit in a `VStack(spacing: SidebarItemStyle.spacing)` instead of a `List(.sidebar)`, whose
 /// selection fills the whole row height, so neighbors touch however much padding the rows get.
 struct SidebarItemStyle: ButtonStyle {
     var selected: Bool
@@ -255,14 +272,13 @@ struct SidebarItemStyle: ButtonStyle {
         let configuration: ButtonStyleConfiguration
         let selected: Bool
         @State private var hovered = false
-        @Environment(\.colorScheme) private var colorScheme
 
         var body: some View {
             let fill: Color = selected ? Palette.selectedFill
                 : configuration.isPressed ? Palette.pressedFill
                 : hovered ? Palette.hoverFill : .clear
             configuration.label
-                .labelStyle(SidebarLabelStyle(emphasized: selected || hovered && colorScheme == .light))
+                .labelStyle(SidebarLabelStyle(emphasized: selected))
                 .padding(.horizontal, 10)
                 .frame(minHeight: SidebarItemStyle.height)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -275,7 +291,7 @@ struct SidebarItemStyle: ButtonStyle {
     }
 
     private struct SidebarLabelStyle: LabelStyle {
-        /// Full-strength text: the selected row, or a hovered one in light mode.
+        /// Full-strength text: the selected row.
         let emphasized: Bool
 
         func makeBody(configuration: Configuration) -> some View {
@@ -406,8 +422,9 @@ struct MenuChevron: View {
 /// Tabs for a toolbar item, as tall as its buttons' highlights, in the toolbar's capsule on macOS 26 (a surface capsule
 /// before): the selected tab is an accent capsule that slides between the tabs (no slide under Reduce Motion).
 /// `compact`: smaller, always on a surface capsule, for a form row. `fillsWidth`: the track takes the width it is
-/// offered and the tabs share it equally; with `systemImage`, each tab shows its icon and title, or its icon alone
-/// when the title does not fit (never truncated).
+/// offered and the tabs share it equally, inset `fillInset` from its edge so the pill floats inside it; with
+/// `systemImage`, each tab shows its icon and title, or its icon alone when the title does not fit (never truncated).
+/// Every shape is a true capsule (`.circular`: radius = half the height), so the pill and the track are concentric.
 struct CapsuleTabs<Tab: Hashable>: View {
     @Binding var selection: Tab
     let tabs: [Tab]
@@ -432,29 +449,34 @@ struct CapsuleTabs<Tab: Hashable>: View {
         }
         // One pill that follows the selected item's frame, so it slides instead of fading between items.
         .background {
-            Capsule()
+            Capsule(style: .circular)
                 .fill(Color.accentColor)
                 .matchedGeometryEffect(id: selection, in: namespace, isSource: false)
         }
         // Also animates a selection set from code (menus, shortcuts).
         .animation(animation, value: selection)
-        .modifier(SurfaceTrack(compact: compact))
+        .modifier(SurfaceTrack(compact: compact, fillsWidth: fillsWidth))
     }
+
+    /// The gap between a `fillsWidth` track's edge and its tabs, on every side.
+    static var fillInset: CGFloat { 4 }
 
     private var animation: Animation? { reduceMotion ? nil : Motion.standard }
 
     /// Before macOS 26 the toolbar draws no capsule around its items; a form never does.
     private struct SurfaceTrack: ViewModifier {
         let compact: Bool
+        let fillsWidth: Bool
 
         func body(content: Content) -> some View {
             if #available(macOS 26, *), PlatformFeatures.liquidGlass, !compact {
                 content
             } else {
                 content
-                    .padding(compact ? 2 : 3)
-                    .background(Capsule().fill(Palette.surface))
-                    .overlay(Capsule().strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
+                    .padding(fillsWidth ? CapsuleTabs.fillInset : compact ? 2 : 3)
+                    .background(Capsule(style: .circular).fill(Palette.surface))
+                    .overlay(Capsule(style: .circular).strokeBorder(Palette.surfaceBorder, lineWidth: 1)
+                        .allowsHitTesting(false))
             }
         }
     }
@@ -484,10 +506,10 @@ struct CapsuleTabs<Tab: Hashable>: View {
                     .frame(minWidth: fillsWidth ? 0 : nil, maxWidth: fillsWidth ? .infinity : nil)
                     .frame(height: height)
                     .background {
-                        if hovered && !selected { Capsule().fill(Palette.hoverFill) }
+                        if hovered && !selected { Capsule(style: .circular).fill(Palette.hoverFill) }
                     }
                     .matchedGeometryEffect(id: tab, in: namespace)
-                    .contentShape(Capsule())
+                    .contentShape(Capsule(style: .circular))
             }
             .buttonStyle(.plain)
             .onHover { hovered = $0 }
@@ -602,7 +624,7 @@ private struct TitleChevronDisclosure: View {
 }
 
 /// The translucent window background, blurring what is behind the window (toolbar included), under a tint so only a
-/// little shows through. The tint follows a live dark/light switch.
+/// little shows through.
 struct WindowGlass: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -617,7 +639,7 @@ struct WindowGlass: NSViewRepresentable {
 
     func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 
-    /// A layer color resolves once, so it is set again in `updateLayer()`, which AppKit calls on an appearance change.
+    /// Sets the tint in `updateLayer()`, the layer-backed view's drawing pass.
     private final class TintView: NSView {
         override init(frame: NSRect) {
             super.init(frame: frame)

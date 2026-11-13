@@ -2,7 +2,8 @@
 import Foundation
 import os
 
-/// One window's tabs: each is a repo, or a Welcome tab (no repo). The header's `TabStrip` draws them. A repo tab has
+/// One window's tabs: each is a repo, or a Welcome tab (no repo). The `TabStrip` under the toolbar draws them, the
+/// toolbar's repo menu lists them. A repo tab has
 /// a `RepoSession`, created when the tab is opened or selected and dropped when it closes; selecting a tab goes
 /// through its session's `select`, so the tab's detail shows its placeholder in the same frame.
 @Observable
@@ -41,6 +42,10 @@ final class WindowModel {
 
     /// The selected tab's session; nil for a Welcome tab.
     var selectedSession: RepoSession? { selectedTabID.flatMap { sessions[$0] } }
+
+    /// The selected tab's session while the tab shows (not Settings or About, where its dialogs have no presenter);
+    /// nil for a Welcome tab. The toolbar's repo actions are disabled without it.
+    var actionSession: RepoSession? { navigation.page == .home ? selectedSession : nil }
 
     /// Opens a repo in a tab and selects it: the tab that already shows it, else the selected tab if it is a
     /// Welcome tab, else a new tab. `nil` opens a new Welcome tab.
@@ -171,7 +176,19 @@ final class WindowModel {
                 return
             }
             session.selectBranch(named: name)
-        case .wip, .commit, .file, .conflict, .pr:
+        case .wip:
+            guard let session = selectedSession else {
+                Self.logger.error("-HistqSelect wip: no repo tab")
+                return
+            }
+            session.selectGraph([.wip])
+        case .commit:
+            guard let session = selectedSession, let hash = request.value else {
+                Self.logger.error("-HistqSelect commit: no repo tab or no commit")
+                return
+            }
+            session.selectGraph([.commit(hash)])
+        case .file, .conflict, .pr:
             // The repo session's select path routes these once it exists.
             Self.logger.notice("-HistqSelect \(request.kind.rawValue, privacy: .public): not routed yet")
         }

@@ -189,7 +189,7 @@ final class WelcomeModel {
     private nonisolated static func initRepository(at url: URL) async throws {
         let toolchain = try await GitToolchain.resolve()
         let runner = GitRunner(executable: toolchain.executable.url)
-        let writeEnv = GitInvocation.environment(profile: nil, base: toolchain.base, access: .write)
+        let writeEnv = GitInvocation.environment(profile: nil, base: await GitToolchain.writeBase(), access: .write)
         try await GitOperations.initRepository(at: url, runner: runner, env: writeEnv)
     }
 
@@ -264,7 +264,7 @@ final class WelcomeModel {
     ) async throws {
         let toolchain = try await GitToolchain.resolve()
         let runner = GitRunner(executable: toolchain.executable.url)
-        let writeEnv = GitInvocation.environment(profile: nil, base: toolchain.base, access: .write)
+        let writeEnv = GitInvocation.environment(profile: nil, base: await GitToolchain.writeBase(), access: .write)
         try await GitOperations.clone(url: url, into: destination, runner: runner, env: writeEnv, progress: progress)
     }
 

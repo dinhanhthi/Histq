@@ -1,5 +1,6 @@
-// Finds the git binary Histq runs: the path set in Settings, else the first `git` on the login shell's
-// PATH, else `/usr/bin/git`. `/usr/bin/git` is only a shim: without the Command Line Tools it pops the
+// Finds the git binary Histq runs: the path set in Settings, else the first `git` in a fixed list of folders
+// (Homebrew on Apple silicon, then Intel, then `/usr/bin`), so no read waits for the login shell (see
+// `LoginShellPath`). `/usr/bin/git` is only a shim: without the Command Line Tools it pops the
 // installer, so it is never run before `xcode-select -p` succeeds. Git older than 2.36 is rejected:
 // `GIT_CONFIG_COUNT` needs 2.31, `worktree list --porcelain -z` and a boolean `core.fsmonitor` need 2.36.
 import Foundation
@@ -38,7 +39,7 @@ public struct GitVersion: Comparable, Sendable, CustomStringConvertible {
 public enum GitExecutableError: Error, Equatable, Sendable {
     /// Only `/usr/bin/git` is available and the Command Line Tools are not installed.
     case commandLineToolsMissing
-    /// No `git` on the PATH and no `/usr/bin/git`.
+    /// No `git` in any of `GitExecutable.searchDirectories`.
     case notFound
     /// The path set in Settings is not an executable file (or could not be started).
     case notExecutable(path: String)
@@ -56,11 +57,20 @@ public struct GitExecutable: Sendable, Equatable {
     public let url: URL
     public let version: GitVersion
 
-    /// `override` (a path from Settings, `~` allowed) when set, else the first `git` on the login shell's
-    /// PATH, else `/usr/bin/git`. An override that is not executable throws instead of falling back, so
-    /// Settings can show the problem. A `/usr/bin/git` found while the Command Line Tools are missing is
-    /// skipped; if nothing else is found the result is `.commandLineToolsMissing`.
-    public static func resolve(override: String? = nil) async throws -> GitExecutable {
+    /// Where `resolve` looks for git, in order, when no override is set.
+    public static let searchDirectories = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+
+    /// The fixed PATH of automatic reads: known at once, unlike the login shell's (`LoginShellPath`).
+    public static let fixedPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+    /// `override` (a path from Settings, `~` allowed) when set, else the first executable `git` in
+    /// `directories` (`searchDirectories` by default). An override that is not executable throws instead of
+    /// falling back, so Settings can show the problem. A `/usr/bin/git` found while the Command Line Tools are
+    /// missing is skipped; if nothing else is found the result is `.commandLineToolsMissing`. It never waits
+    /// for the login shell: it takes a `git --version` (and `xcode-select -p` for `/usr/bin/git`).
+    public static func resolve(
+        override: String? = nil, directories: [String] = searchDirectories
+    ) async throws -> GitExecutable {
         if let override = override?.trimmingCharacters(in: .whitespacesAndNewlines), !override.isEmpty {
             let path = (override as NSString).expandingTildeInPath
             guard isExecutable(path) else { throw GitExecutableError.notExecutable(path: path) }
@@ -68,7 +78,6 @@ public struct GitExecutable: Sendable, Equatable {
         }
         var seen = Set<String>()
         var toolsMissing = false
-        let directories = await loginShellPath().split(separator: ":").map(String.init) + ["/usr/bin"]
         for directory in directories where directory.hasPrefix("/") && seen.insert(directory).inserted {
             let candidate = URL(filePath: directory).appending(path: "git")
             guard isExecutable(candidate.path) else { continue }
@@ -98,14 +107,6 @@ public struct GitExecutable: Sendable, Equatable {
         return GitExecutable(url: url, version: version)
     }
 
-    /// The login shell's PATH plus Homebrew's directories, resolved once per launch (a GUI app only gets
-    /// launchd's minimal PATH). Child processes get this PATH too.
-    public static func loginShellPath() async -> String {
-        await loginPath.value
-    }
-
-    private static let loginPath = Task.detached(priority: .utility) { await resolveLoginShellPath() }
-
     private static let minimalEnvironment = [
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSHomeDirectory(), "LC_ALL": "C",
     ]
@@ -124,91 +125,5 @@ public struct GitExecutable: Sendable, Equatable {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && !isDirectory.boolValue
             && FileManager.default.isExecutableFile(atPath: path)
-    }
-
-    // MARK: - Login shell PATH (ported from EchoKit's ShellEnvironment)
-
-    private static func resolveLoginShellPath() async -> String {
-        let output = await captureShell(
-            URL(filePath: loginShell()), arguments: ["-ilc", "echo __BEGIN__; command env; echo __END__"],
-            timeout: .seconds(8), until: Data("\n__END__\n".utf8))
-        let base = parsePath(String(decoding: output, as: UTF8.self))
-            ?? ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        return mergedPath(base, extra: ["/opt/homebrew/bin", "/usr/local/bin"])
-    }
-
-    /// The `PATH=` line between the markers of the login shell's output (rc files may print around them).
-    static func parsePath(_ output: String) -> String? {
-        guard let begin = output.range(of: "__BEGIN__\n") else { return nil }
-        for line in output[begin.upperBound...].split(separator: "\n") {
-            if line == "__END__" { break }
-            if line.hasPrefix("PATH=") {
-                let path = line.dropFirst(5).replacing(/\u{1B}\[[0-9;?]*[A-Za-z]/, with: "")
-                return path.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-        return nil
-    }
-
-    static func mergedPath(_ base: String, extra: [String]) -> String {
-        var seen = Set<String>()
-        let directories = base.split(separator: ":").map(String.init) + extra
-        return directories.filter { !$0.isEmpty && seen.insert($0).inserted }.joined(separator: ":")
-    }
-
-    private static func loginShell() -> String {
-        if let shell = ProcessInfo.processInfo.environment["SHELL"], !shell.isEmpty { return shell }
-        if let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell { return String(cString: shell) }
-        return "/bin/zsh"
-    }
-
-    /// Stdout of the shell (empty stdin) up to `marker` or EOF, for at most `timeout`; the shell is
-    /// terminated if still running. It does not wait for the exit: a daemon started by an rc file can keep
-    /// the pipe open, and an interactive shell may ignore SIGTERM.
-    private static func captureShell(
-        _ executable: URL, arguments: [String], timeout: Duration, until marker: Data
-    ) async -> Data {
-        #if DEBUG
-        dispatchPrecondition(condition: .notOnQueue(.main))
-        #endif
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardInput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        let output = ShellOutput()
-        let (finished, finish) = AsyncStream<Void>.makeStream()
-        stdout.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            if chunk.isEmpty || output.append(chunk, until: marker) { finish.finish() }
-        }
-        defer { stdout.fileHandleForReading.readabilityHandler = nil }
-        do { try process.run() } catch { return Data() }
-        let timer = Task {
-            try await Task.sleep(for: timeout)
-            finish.finish()
-        }
-        for await _ in finished {}
-        timer.cancel()
-        if process.isRunning { process.terminate() }
-        return output.data
-    }
-}
-
-/// The login shell's stdout, filled from the pipe's handler thread.
-private final class ShellOutput: @unchecked Sendable {
-    private let lock = NSLock()
-    private var buffer = Data()
-
-    var data: Data { lock.withLock { buffer } }
-
-    /// Appends `chunk`; true once `marker` has been seen.
-    func append(_ chunk: Data, until marker: Data) -> Bool {
-        lock.withLock {
-            buffer.append(chunk)
-            return buffer.range(of: marker) != nil
-        }
     }
 }

@@ -24,12 +24,15 @@ public enum GitInvocation {
         case read(filterDrivers: [String], diffDrivers: [String] = [])
     }
 
-    /// The base every invocation starts from: the login shell's PATH (a GUI app only gets launchd's),
-    /// HOME, and the few inherited variables ssh and gpg need to reach their agents.
+    /// The base every invocation starts from: `path` as PATH, HOME, and the few inherited variables ssh and gpg
+    /// need to reach their agents. Reads use the default, the fixed `GitExecutable.fixedPath`, so they never wait
+    /// for the login shell; writes and network commands pass `LoginShellPath.value()` (a GUI app only gets
+    /// launchd's PATH, which misses git-lfs, gpg and the tools hooks call).
     public static func baseEnvironment(
-        home: String = NSHomeDirectory(), inherited: [String: String] = ProcessInfo.processInfo.environment
-    ) async -> [String: String] {
-        var env = ["PATH": await GitExecutable.loginShellPath(), "HOME": home]
+        path: String = GitExecutable.fixedPath, home: String = NSHomeDirectory(),
+        inherited: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var env = ["PATH": path, "HOME": home]
         for key in ["USER", "LOGNAME", "TMPDIR", "SSH_AUTH_SOCK", "GNUPGHOME"] {
             if let value = inherited[key] { env[key] = value }
         }

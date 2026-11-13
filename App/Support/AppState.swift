@@ -95,10 +95,10 @@ enum PrefKey: String, CaseIterable {
     case tabPosition
     /// Native window tabs in the traffic-light row (Phase 8 attempt).
     case nativeTabsOnTop
-    /// Appearance: "system", "dark" or "light" (`AppearanceMode`).
-    case theme
     /// Repo layout panel widths, encoded by `RepoLayoutView`; empty = the layout's defaults.
     case panelWidths
+    /// Graph column widths, encoded by `GraphView` ("refs:120,graph:120,…"); empty = the graph's defaults.
+    case graphColumnWidths
     /// Terminal font family; empty = the system monospaced font.
     case terminalFontName
     /// Terminal font size in points.
@@ -113,13 +113,15 @@ enum PrefKey: String, CaseIterable {
     case terminalOpenWithNewTab
     /// The Welcome page's recent repositories: folder paths, most recent first (`RecentRepos`).
     case recentRepos
+    /// The detail panel's file lists: "path" (one row per file) or "tree" (rows under their folders).
+    case fileListMode
 
     /// The value a key has until the user sets it.
     var defaultValue: Any {
         switch self {
         case .dateFormat: "MM/dd/yyyy @ h:mm a"
         case .rowDensity: "regular"
-        case .avatarMode: "real"
+        case .avatarMode: "generated"
         case .pullMode: "fastForward"
         case .autoFetchMinutes: 0
         case .pruneOnFetch: false
@@ -128,8 +130,8 @@ enum PrefKey: String, CaseIterable {
         case .defaultProfileID: ""
         case .tabPosition: "top"
         case .nativeTabsOnTop: false
-        case .theme: AppearanceMode.defaultMode.rawValue
         case .panelWidths: ""
+        case .graphColumnWidths: ""
         case .terminalFontName: ""
         case .terminalFontSize: 12.0
         case .terminalShell: ""
@@ -137,6 +139,7 @@ enum PrefKey: String, CaseIterable {
         case .terminalCursor: "block"
         case .terminalOpenWithNewTab: false
         case .recentRepos: [String]()
+        case .fileListMode: "path"
         }
     }
 }

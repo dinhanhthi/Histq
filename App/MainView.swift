@@ -1,5 +1,5 @@
-// The main window: a header row in the traffic-light row (the tab strip), the selected page under it, over the window
-// glass.
+// The main window: the toolbar in the traffic-light row (`HeaderToolbar`), the tab strip under it, then the selected
+// page, over the window glass.
 import AppKit
 import SwiftUI
 
@@ -23,30 +23,26 @@ final class Navigation {
     private(set) var forward = true
 }
 
-/// The header row, drawn by SwiftUI over the window's empty `.unifiedCompact` toolbar (Dblore values).
+/// The rows under the toolbar. The tab strip starts at the top of the safe area, so it sits under the toolbar, and
+/// under the native window tab bar when one shows (Phase 8).
 enum HeaderMetrics {
-    /// The titlebar row of an empty compact toolbar: 40 pt on macOS 26+, 38 before. The traffic lights are centered
-    /// in it. Never sized from the top safe area.
-    static let height: CGFloat = {
-        if #available(macOS 26, *) { return 40 }
-        return 38
-    }()
-    /// What the traffic lights take at the leading edge: AppKit's zoom button maxX (72 on macOS 27) + 16.
-    static let trafficLightsWidth: CGFloat = 88
-    /// Between the header row and the top of every page (the repo panels, Welcome, Settings, About): the 8 pt gap
-    /// of the cards.
+    /// The tab strip from the window's leading edge: the cards' inset.
+    static let tabStripInset: CGFloat = RepoLayoutMetrics.inset
+    /// Between the tab strip and the top of every page (the repo panels, Welcome, Settings, About): the 8 pt gap of
+    /// the cards.
     static let contentGap: CGFloat = SectionCardMetrics.spacing
 }
 
 struct MainView: View {
     @Bindable var navigation: Navigation
+    @Environment(WindowModel.self) private var model
     /// The page on screen; it follows `navigation.page` with a slide.
     @State private var shownPage = Page.home
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            tabRow
             // Rendered from `shownPage`, so the leaving page keeps its content while it slides out.
             ZStack {
                 switch shownPage {
@@ -60,8 +56,6 @@ struct MainView: View {
             .clipped()
             .padding(.top, HeaderMetrics.contentGap)
         }
-        // The header starts at the window's top edge, in the traffic-light row.
-        .ignoresSafeArea(.container, edges: .top)
         // Whoever switches the page (a tab, the Settings button, a menu), it slides the same way.
         .onChange(of: navigation.page, initial: true) { old, new in
             guard old != new else {
@@ -72,15 +66,28 @@ struct MainView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WindowGlass().ignoresSafeArea())
+        // A band behind the toolbar row (drawn above it by AppKit), so scrolled content never shows through the
+        // transparent title bar; the same glass as the window, so toolbar and content still read as one.
+        .overlay {
+            GeometryReader { proxy in
+                WindowGlass()
+                    .frame(height: proxy.safeAreaInsets.top)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .ignoresSafeArea(.container, edges: .top)
+            }
+            .allowsHitTesting(false)
+        }
+        .modifier(HardTopScrollEdge())
     }
 
-    /// Room for the traffic lights, then the tab strip. Empty header space drags the window.
-    private var header: some View {
+    /// The tab strip, full width under the toolbar, then the menus' running operation. Empty space in the row drags
+    /// the window, like the toolbar's.
+    private var tabRow: some View {
         HStack(spacing: 0) {
-            Color.clear.frame(width: HeaderMetrics.trafficLightsWidth)
             TabStrip()
+            TabRowStatus(model: model)
         }
-        .frame(height: HeaderMetrics.height)
+        .padding(.leading, HeaderMetrics.tabStripInset)
         .background(WindowDragArea())
     }
 
@@ -105,6 +112,20 @@ private struct TabContent: View {
             RepoLayoutView(session: session).id(session.id)
         } else if let id = model.selectedTabID {
             WelcomeView(model: model.welcome(for: id)).id(id)
+        }
+    }
+}
+
+/// The selected repo's operations started from a menu (a merge, a rebase…), which have no toolbar button to show
+/// their progress on.
+private struct TabRowStatus: View {
+    let model: WindowModel
+
+    var body: some View {
+        if let session = model.selectedSession {
+            RunningStatus(session: session)
+                .frame(maxWidth: 240, alignment: .trailing)
+                .padding(.trailing, 8)
         }
     }
 }
@@ -141,7 +162,7 @@ private struct AboutPage: View {
 
 // MARK: - Window dragging (Dblore `WindowUtilities.swift`; Phase 8.1 moves these into `App/Window/WindowUtilities.swift`)
 
-/// Behind the header: a mouse-down on empty header space drags the window, like a native titlebar.
+/// Behind the tab strip: a mouse-down on its empty space drags the window, like the toolbar's.
 struct WindowDragArea: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { WindowDragView() }
 
@@ -156,9 +177,9 @@ struct WindowDragArea: NSViewRepresentable {
     }
 }
 
-/// Under the header's interactive controls: the window is not movable while the pointer is over them, so a drag in
-/// the transparent titlebar reaches the SwiftUI gesture (a tab's reorder) instead of moving the window. AppKit asks the
-/// hosting view, not this background view, whether a mouse-down moves the window.
+/// Under the tab strip's interactive controls: the window is not movable while the pointer is over them, so a drag
+/// reaches the SwiftUI gesture (a tab's reorder) instead of moving the window. AppKit asks the hosting view, not this
+/// background view, whether a mouse-down moves the window.
 struct WindowDragBlocker: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { WindowDragBlockerView() }
 

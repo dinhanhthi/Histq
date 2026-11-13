@@ -22,7 +22,6 @@ private enum SettingsSection: CaseIterable, Identifiable {
 }
 
 struct SettingsSidebarView: View {
-    @AppStorage(AppearanceMode.storageKey, store: Preferences.defaults) private var appearance = AppearanceMode.defaultMode
     // Sample settings: replace them with the app's own.
     @AppStorage("ShowPreviews", store: Preferences.defaults) private var showPreviews = true
     @AppStorage("ConfirmDelete", store: Preferences.defaults) private var confirmDelete = true
@@ -98,7 +97,6 @@ struct SettingsSidebarView: View {
         }
         .onAppear { sidebarFocused = true }
         .onChange(of: section, initial: true) { _, new in opened.insert(new) }
-        .onChange(of: appearance) { _, mode in mode.apply() }
         .onChange(of: modalOpen) { _, open in
             // The sidebar was disabled behind the modal: take the focus back on the next turn.
             if !open { DispatchQueue.main.async { sidebarFocused = true } }
@@ -160,12 +158,10 @@ struct SettingsSidebarView: View {
     private func content(_ section: SettingsSection) -> some View {
         switch section {
         case .appearance:
+            // Histq is dark only. Phase 7 adds the avatar mode, the date format and the row density here.
             SettingsGroup("Appearance") {
-                LabeledContent("Theme") {
-                    CapsuleTabs(selection: $appearance, tabs: AppearanceMode.allCases,
-                                title: { Text($0.title) }, compact: true)
-                        .fixedSize()
-                }
+                Text("More appearance options come later.")
+                    .foregroundStyle(.secondary)
             }
         case .general:
             SettingsGroup("General", description: "Each change is saved at once.") {

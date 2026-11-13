@@ -9,9 +9,11 @@ enum SectionCardMetrics {
 
 /// A titled card (`GlassCard`: surface fill, 1 pt `surfaceBorder` edge, the content cards' radius). Its header holds
 /// an optional icon, the title, an optional count (a skeleton bar while `countIsLoading`) and, when `isExpanded` is
-/// given, a chevron: a click on the header collapses or expands the body at once.
-struct SectionCard<Content: View>: View {
-    let title: String
+/// given, a chevron: a click on the header collapses or expands the body at once. `accessory` sits at the header's
+/// trailing edge (small buttons such as "Stage all"). A nil `title` gives a card without a header (the commit graph,
+/// whose column titles are its header); its body then fills the card to the top.
+struct SectionCard<Content: View, Accessory: View>: View {
+    let title: String?
     let systemImage: String?
     let count: Int?
     let countIsLoading: Bool
@@ -19,12 +21,13 @@ struct SectionCard<Content: View>: View {
     /// Around the body, below the header: smaller for rows that draw their own capsules.
     let contentPadding: CGFloat
     @ViewBuilder let content: () -> Content
+    @ViewBuilder let accessory: () -> Accessory
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
-        _ title: String, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
+        _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
         isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding,
-        @ViewBuilder content: @escaping () -> Content
+        @ViewBuilder content: @escaping () -> Content, @ViewBuilder accessory: @escaping () -> Accessory
     ) {
         self.title = title
         self.systemImage = systemImage
@@ -33,32 +36,39 @@ struct SectionCard<Content: View>: View {
         self.isExpanded = isExpanded
         self.contentPadding = contentPadding
         self.content = content
+        self.accessory = accessory
     }
 
     private static var headerHeight: CGFloat { 32 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let isExpanded {
-                Button {
-                    withAnimation(reduceMotion ? nil : Motion.toggle) { isExpanded.wrappedValue.toggle() }
-                } label: {
-                    header(chevron: isExpanded.wrappedValue)
+            if let title {
+                HStack(spacing: 0) {
+                    if let isExpanded {
+                        Button {
+                            withAnimation(reduceMotion ? nil : Motion.toggle) { isExpanded.wrappedValue.toggle() }
+                        } label: {
+                            header(title, chevron: isExpanded.wrappedValue)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(count.map { "\(title), \($0)" } ?? title)
+                        .accessibilityValue(isExpanded.wrappedValue ? "Expanded" : "Collapsed")
+                    } else {
+                        header(title, chevron: nil)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                    accessory()
+                        .padding(.trailing, SettingsMetrics.cardPadding)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(count.map { "\(title), \($0)" } ?? title)
-                .accessibilityValue(isExpanded.wrappedValue ? "Expanded" : "Collapsed")
-            } else {
-                header(chevron: nil)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityAddTraits(.isHeader)
             }
             if isExpanded?.wrappedValue ?? true {
                 VStack(alignment: .leading, spacing: 0) {
                     content()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding([.horizontal, .bottom], contentPadding)
+                .padding(title == nil ? .all : [.horizontal, .bottom], contentPadding)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -67,7 +77,7 @@ struct SectionCard<Content: View>: View {
     }
 
     /// `chevron`: nil when the card does not collapse, else whether it is expanded.
-    private func header(chevron expanded: Bool?) -> some View {
+    private func header(_ title: String, chevron expanded: Bool?) -> some View {
         HStack(spacing: 6) {
             if let expanded {
                 Image(systemName: "chevron.right")
@@ -95,5 +105,16 @@ struct SectionCard<Content: View>: View {
         .padding(.horizontal, isExpanded == nil ? SettingsMetrics.cardPadding : 10)
         .frame(height: Self.headerHeight)
         .contentShape(Rectangle())
+    }
+}
+
+extension SectionCard where Accessory == EmptyView {
+    init(
+        _ title: String?, systemImage: String? = nil, count: Int? = nil, countIsLoading: Bool = false,
+        isExpanded: Binding<Bool>? = nil, contentPadding: CGFloat = SettingsMetrics.cardPadding,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.init(title, systemImage: systemImage, count: count, countIsLoading: countIsLoading, isExpanded: isExpanded,
+                  contentPadding: contentPadding, content: content, accessory: { EmptyView() })
     }
 }

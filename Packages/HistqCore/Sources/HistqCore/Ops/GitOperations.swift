@@ -273,6 +273,26 @@ public struct GitOperations: Sendable {
         try await write(["rebase", "--end-of-options", upstream])
     }
 
+    /// Fast-forwards the local `branch` to `source`, a full ref (`refs/heads/x`, `refs/remotes/origin/x`). Refused
+    /// (`GitError.nonFastForward`) unless `branch` is an ancestor of `source`. The checked-out branch moves with
+    /// `merge --ff-only` (its index and files follow); another branch with a local `fetch . <source>:refs/heads/<branch>`,
+    /// which also refuses a branch checked out in another worktree.
+    public func fastForward(_ branch: String, to source: String) async throws {
+        try await validateBranchName(branch)
+        guard source.hasPrefix("refs/"), await checkRefFormat(source) else {
+            throw GitOperationError.invalidBranchName(source)
+        }
+        try await lane { ops in
+            let head = try await ops.exec(["symbolic-ref", "-q", "HEAD"], allowedExitCodes: [0, 1])
+            if head.text.trimmingCharacters(in: .whitespacesAndNewlines) == "refs/heads/\(branch)" {
+                try await ops.exec(["merge", "--ff-only", "--end-of-options", source])
+            } else {
+                try await ops.exec(
+                    ["fetch", "--no-write-fetch-head", "--end-of-options", ".", "\(source):refs/heads/\(branch)"])
+            }
+        }
+    }
+
     /// Cherry-picks `commits` in order; `mainline` (1 or 2) picks a merge relative to that parent.
     public func cherryPick(_ commits: [String], mainline: Int? = nil) async throws {
         guard !commits.isEmpty else { throw GitOperationError.unsupported("cherry-pick without commits") }
@@ -486,8 +506,11 @@ public struct GitOperations: Sendable {
 
     /// Runs one command without taking the lane: only call it from inside `lane`.
     @discardableResult
-    private func exec(_ args: [String], stdin: Data? = nil, network: Bool = false) async throws -> GitResult {
+    private func exec(
+        _ args: [String], stdin: Data? = nil, network: Bool = false, allowedExitCodes: Set<Int32> = [0]
+    ) async throws -> GitResult {
         try await runner.run(
-            args, cwd: cwd, env: network ? networkEnv : env, stdin: stdin, timeout: network ? networkTimeout : nil)
+            args, cwd: cwd, env: network ? networkEnv : env, stdin: stdin, timeout: network ? networkTimeout : nil,
+            allowedExitCodes: allowedExitCodes)
     }
 }

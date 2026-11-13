@@ -202,4 +202,46 @@ struct GitOperationsTests {
         }
         #expect(try await fx.lines(["remote"]) == ["origin"])
     }
+
+    @Test("fast-forward moves a behind branch, refuses a diverged one, ff-merges HEAD's, never another worktree's")
+    func fastForward() async throws {
+        let fx = try await Repo("graph")
+        defer { fx.copy.remove() }
+
+        // feature is behind origin/feature by 1: it moves there, HEAD stays on main.
+        try await fx.ops.fastForward("feature", to: "refs/remotes/origin/feature")
+        #expect(try await fx.git(["rev-parse", "feature"]) == (try await fx.git(["rev-parse", "origin/feature"])))
+        #expect(try await fx.git(["rev-parse", "--abbrev-ref", "HEAD"]) == "main")
+
+        // develop is ahead of origin/develop: not a fast-forward.
+        let develop = try await fx.git(["rev-parse", "develop"])
+        await #expect {
+            try await fx.ops.fastForward("develop", to: "refs/remotes/origin/develop")
+        } throws: { error in
+            if case GitError.nonFastForward = error { true } else { false }
+        }
+        #expect(try await fx.git(["rev-parse", "develop"]) == develop)
+
+        // wt is checked out in graph-wt: refused, unchanged.
+        let wt = try await fx.git(["rev-parse", "wt"])
+        let next = try await fx.git(["commit-tree", "-p", "wt", "-m", "next", "wt^{tree}"])
+        try await fx.git(["update-ref", "refs/heads/wt-next", next])
+        await #expect(throws: (any Error).self) { try await fx.ops.fastForward("wt", to: "refs/heads/wt-next") }
+        #expect(try await fx.git(["rev-parse", "wt"]) == wt)
+
+        // The checked-out branch: merge --ff-only, the working tree follows.
+        try await fx.git(["stash", "push", "-q", "-u"])
+        let main = try await fx.git(["rev-parse", "main"])
+        try await fx.git(["reset", "-q", "--hard", "main~1"])
+        try await fx.ops.fastForward("main", to: "refs/remotes/origin/main")
+        #expect(try await fx.git(["rev-parse", "main"]) == main)
+        #expect(try await fx.git(["status", "--porcelain"]).isEmpty)
+
+        await #expect(throws: GitOperationError.invalidBranchName("-x")) {
+            try await fx.ops.fastForward("-x", to: "refs/heads/main")
+        }
+        await #expect(throws: GitOperationError.invalidBranchName("+refs/heads/main")) {
+            try await fx.ops.fastForward("feature", to: "+refs/heads/main")
+        }
+    }
 }

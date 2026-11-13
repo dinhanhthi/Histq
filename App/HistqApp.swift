@@ -11,7 +11,7 @@ enum HistqApp {
 
     static func main() {
         UITiming.markLaunch()
-        // Resolving git takes seconds: start it before the first repo needs it.
+        // Start resolving git and the login shell's PATH (seconds, for writes) before the first repo needs them.
         GitToolchain.prepare()
         StatePaths.prepare()
         Preferences.registerDefaults()
@@ -32,23 +32,27 @@ final class WindowState {
 /// Owns the windows, one `WindowModel` each, and the main menu for the app lifetime.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
-    /// A window with its tabs and visibility.
+    /// A window with its tabs, visibility and toolbar.
     private final class Entry {
         let window: NSWindow
         let model: WindowModel
         let state: WindowState
+        /// The toolbar's delegate and items' target, which the toolbar does not retain.
+        let toolbar: HeaderToolbar
 
-        init(window: NSWindow, model: WindowModel, state: WindowState) {
+        init(window: NSWindow, model: WindowModel, state: WindowState, toolbar: HeaderToolbar) {
             self.window = window
             self.model = model
             self.state = state
+            self.toolbar = toolbar
         }
     }
 
     private var entries: [Entry] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        AppearanceMode.current.apply()
+        // Histq is dark mode only, whatever the system's appearance.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.mainMenu = makeMainMenu()
     }
 
@@ -92,18 +96,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             rootView: MainView(navigation: model.navigation).environment(state).environment(model))
         // The window owns its size, not the SwiftUI content.
         hosting.sizingOptions = []
-        // SwiftUI installs no toolbar or title: `MainView` draws the header row itself.
+        // The window's toolbar is AppKit's (`HeaderToolbar`): SwiftUI bridges none, so content updates never touch it.
         hosting.sceneBridgingOptions = []
         let window = NSWindow(contentViewController: hosting)
+        let toolbar = HeaderToolbar(model: model)
+        window.toolbar = toolbar.toolbar
         window.title = "Histq"
         window.titleVisibility = .hidden
-        // An empty compact toolbar makes the titlebar one row as tall as the header (`HeaderMetrics.height`), with
-        // the traffic lights centered in it.
-        let toolbar = NSToolbar(identifier: "com.math2it.histq.main")
-        toolbar.allowsUserCustomization = false
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
-        window.toolbarStyle = .unifiedCompact
+        // One row for the traffic lights and the toolbar; the tab strip is the content's first row under it.
+        window.toolbarStyle = .unified
         // One background for the toolbar and the content, without a line between them.
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
@@ -127,7 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         WindowSizing.clampMinimum(of: window)
         window.delegate = self
         model.closeWindow = { [weak window] in window?.performClose(nil) }
-        let entry = Entry(window: window, model: model, state: state)
+        let entry = Entry(window: window, model: model, state: state, toolbar: toolbar)
         entries.append(entry)
         return entry
     }

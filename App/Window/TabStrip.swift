@@ -1,13 +1,15 @@
-// The header's tab strip (Rex style): the window's tabs in one capsule track, then New tab, Settings and the tab list.
+// The tab strip under the toolbar (Rex style): the window's tabs as standalone pills, then New tab and the tab list.
 import AppKit
 import SwiftUI
 
-/// Sizes of the tab strip. The tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the track
+/// Sizes of the tab strip. The tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the row
 /// scrolls.
 private enum TabStripMetrics {
-    static let trackHeight: CGFloat = 30
-    /// Between the track's edge and the tabs.
-    static let trackInset: CGFloat = 2
+    static let tabHeight: CGFloat = 28
+    /// Between two tabs.
+    static let gap: CGFloat = 5
+    /// Around the row inside its scroll view, so the pills' edges are not clipped.
+    static let rowInset: CGFloat = 1
     static let minTabWidth: CGFloat = 96
     static let maxTabWidth: CGFloat = 200
     /// The close button's square, and the matching slot before the title (the profile color dot, Phase 7).
@@ -16,8 +18,8 @@ private enum TabStripMetrics {
     static let dragThreshold: CGFloat = 5
 }
 
-/// The window's tabs and the header's trailing buttons. A press on a tab selects it at once (on mouse-down); a drag
-/// past a few points reorders it.
+/// The window's tabs, then New Tab and the tab list. A press on a tab selects it at once (on mouse-down); a drag past a
+/// few points reorders it.
 struct TabStrip: View {
     @Environment(WindowModel.self) private var model
     @State private var showingTabList = false
@@ -30,11 +32,6 @@ struct TabStrip: View {
                     Label("New Tab", systemImage: "plus")
                 }
                 .help("New Tab")
-                Button { model.toggleSettings() } label: {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                .foregroundStyle(model.navigation.page == .settings ? Color.primary : Color.secondary)
-                .help("Settings")
                 Button { showingTabList.toggle() } label: {
                     Label("All Tabs", systemImage: "chevron.down")
                 }
@@ -53,8 +50,8 @@ struct TabStrip: View {
     }
 }
 
-/// The tabs in a capsule track: equal widths, a hairline between two unselected tabs, a lighter capsule for the
-/// selected one that slides to the next selection.
+/// The tabs as standalone pills with a small gap: equal widths, a subtle fill for each, a stronger one for the
+/// selected tab that slides to the next selection.
 private struct TabTrack: View {
     let model: WindowModel
     @Namespace private var namespace
@@ -72,34 +69,32 @@ private struct TabTrack: View {
     var body: some View {
         GeometryReader { proxy in
             let count = model.tabs.count
-            let inset = TabStripMetrics.trackInset
+            let gaps = TabStripMetrics.gap * CGFloat(max(count - 1, 0)) + 2 * TabStripMetrics.rowInset
             let tabWidth = min(TabStripMetrics.maxTabWidth,
-                               max(TabStripMetrics.minTabWidth, (proxy.size.width - 2 * inset) / CGFloat(max(count, 1))))
-            let rowWidth = tabWidth * CGFloat(count) + 2 * inset
+                               max(TabStripMetrics.minTabWidth, (proxy.size.width - gaps) / CGFloat(max(count, 1))))
+            let rowWidth = tabWidth * CGFloat(count) + gaps
             ScrollViewReader { scroller in
                 ScrollView(.horizontal, showsIndicators: false) {
                     row(tabWidth: tabWidth)
                 }
                 .scrollDisabled(rowWidth <= proxy.size.width)
                 .frame(width: min(rowWidth, proxy.size.width))
-                .clipShape(Capsule())
-                .modifier(TrackBackground())
                 .background(WindowDragBlocker())
                 .onChange(of: model.selectedTabID) { _, id in
                     guard let id else { return }
                     withAnimation(animation) { scroller.scrollTo(id) }
                 }
             }
-            // Only the track takes clicks: the empty space after it drags the window.
+            // Only the tabs take clicks: the empty space after them drags the window.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
-        .frame(height: TabStripMetrics.trackHeight)
+        .frame(height: TabStripMetrics.tabHeight + 2 * TabStripMetrics.rowInset)
     }
 
     private var animation: Animation? { reduceMotion ? nil : Motion.standard }
 
     private func row(tabWidth: CGFloat) -> some View {
-        HStack(spacing: 0) {
+        HStack(spacing: TabStripMetrics.gap) {
             ForEach(Array(model.tabs.enumerated()), id: \.element.id) { index, tab in
                 let selected = tab.id == model.selectedTabID
                 let dragged = tab.id == draggedID
@@ -107,34 +102,18 @@ private struct TabTrack: View {
                         dragged: dragged, namespace: namespace,
                         onSelect: { model.selectTab(id: tab.id) },
                         onClose: { close(tab.id) })
-                    .frame(width: tabWidth)
-                    .overlay(alignment: .leading) {
-                        if index > 0, showsSeparator(before: index) {
-                            Rectangle()
-                                .fill(Palette.tabSeparator)
-                                .frame(width: 1, height: 14)
-                                .offset(x: -0.5)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .offset(x: offset(of: index, id: tab.id, step: tabWidth))
+                    .frame(width: tabWidth, height: TabStripMetrics.tabHeight)
+                    .offset(x: offset(of: index, id: tab.id, step: tabWidth + TabStripMetrics.gap))
                     // Neighbors slide aside; the dragged tab tracks the pointer without lag.
                     .animation(draggedID != nil && !dragged ? animation : nil, value: dragTarget)
                     .zIndex(dragged ? 1 : 0)
-                    .gesture(press(tab.id, index: index, step: tabWidth))
+                    .gesture(press(tab.id, index: index, step: tabWidth + TabStripMetrics.gap))
                     .id(tab.id)
             }
         }
-        .padding(TabStripMetrics.trackInset)
+        .padding(TabStripMetrics.rowInset)
         // The selected capsule slides, also for a selection made elsewhere (a menu, the tab list).
         .animation(animation, value: model.selectedTabID)
-    }
-
-    /// No hairline next to the selected tab, nor while a tab is dragged.
-    private func showsSeparator(before index: Int) -> Bool {
-        guard draggedID == nil else { return false }
-        let tabs = model.tabs
-        return tabs[index].id != model.selectedTabID && tabs[index - 1].id != model.selectedTabID
     }
 
     /// The dragged tab follows the pointer; the tabs between its old and new place shift by one tab.
@@ -191,20 +170,7 @@ private struct TabTrack: View {
     }
 }
 
-/// Liquid Glass on macOS 26 (unless `--force-fallbacks`); before, a `Palette.tabFill` capsule with a 1 pt edge.
-private struct TrackBackground: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26, *), PlatformFeatures.liquidGlass {
-            content.glassEffect(.regular, in: Capsule())
-        } else {
-            content
-                .background(Capsule().fill(Palette.tabFill))
-                .overlay(Capsule().strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
-        }
-    }
-}
-
-/// One tab: its name, centered and cut with "…", and a close button while hovered.
+/// One tab, a standalone pill: its name, centered and cut with "…", and a close button while hovered.
 private struct TabItem: View {
     let title: String
     let help: String
@@ -242,15 +208,18 @@ private struct TabItem: View {
         .frame(maxHeight: .infinity)
         .background {
             if selected {
-                Capsule()
+                // A flat fill on every version: Liquid Glass over the window's glass reads too close to `tabFill`.
+                Capsule(style: .circular)
                     .fill(Palette.selectedTabFill)
-                    .overlay(Capsule().strokeBorder(Palette.selectedBorder, lineWidth: 1))
+                    .overlay(Capsule(style: .circular).strokeBorder(Palette.selectedBorder, lineWidth: 1))
                     .matchedGeometryEffect(id: "selectedTab", in: namespace)
-            } else if hovered || dragged {
-                Capsule().fill(Palette.hoverFill)
+            } else {
+                Capsule(style: .circular)
+                    .fill(Palette.tabFill)
+                    .overlay(Capsule(style: .circular).fill(hovered || dragged ? Palette.hoverFill : .clear))
             }
         }
-        .contentShape(Capsule())
+        .contentShape(Capsule(style: .circular))
         .animation(Motion.hover, value: hovered)
         .onHover { hovered = $0 }
         .help(help)

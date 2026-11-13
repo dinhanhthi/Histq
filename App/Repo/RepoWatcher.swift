@@ -42,8 +42,16 @@ struct RepoDirectories: Sendable {
             throw GitError.other(exit: result.exitCode, stderrTail: "unexpected rev-parse output")
         }
         // FSEvents reports real paths (`/private/tmp`, not `/tmp`).
-        let url = { (path: String) in URL(filePath: path, directoryHint: .isDirectory).resolvingSymlinksInPath() }
+        let url = { (path: String) in URL(filePath: realPath(path), directoryHint: .isDirectory) }
         return RepoDirectories(worktree: url(lines[0]), gitDir: url(lines[1]), commonDir: url(lines[2]))
+    }
+
+    /// `path` with every symlink resolved, as FSEvents reports it (`realpath(3)`); `path` itself when that fails.
+    /// Not `URL.resolvingSymlinksInPath()`: it strips `/private` (`/private/tmp/x` becomes `/tmp/x`).
+    static func realPath(_ path: String) -> String {
+        guard let resolved = realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 }
 
@@ -153,7 +161,7 @@ final class RepoWatcher: @unchecked Sendable {
     /// Histq's own files (the timing and refresh logs of a DEBUG state dir, Application Support): a repo that
     /// contains them (a QA run on the Histq checkout, a dotfiles repo in the home folder) must not refresh on them,
     /// or each `refresh` line would trigger the next refresh.
-    private static let ownFiles = StatePaths.root.resolvingSymlinksInPath().path
+    private static let ownFiles = RepoDirectories.realPath(StatePaths.root.path)
 
     /// The refresh a change at `path` needs: git-dir paths first (only HEAD, refs, packed-refs and the index count;
     /// objects, logs, worktrees and the rest are ignored), then any other worktree path is `status`. Git's lock files

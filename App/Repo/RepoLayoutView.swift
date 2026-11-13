@@ -1,5 +1,5 @@
 // A repo tab's three panels (Rex style: solid cards on the window glass with a small gap): the sidebar, the commit
-// list (the graph's place; Phase 5 mounts the real graph), and the detail. The two gaps are draggable dividers; the
+// graph, and the detail. The two gaps are draggable dividers; the
 // side panels' widths are saved in `PrefKey.panelWidths`.
 import HistqCore
 import SwiftUI
@@ -20,8 +20,6 @@ enum RepoLayoutMetrics {
     static let minimumWindowSize = CGSize(
         width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome, height: 520)
     fileprivate static let defaults = PanelWidths(sidebar: 240, detail: 360)
-    /// Rows the placeholder list draws; the real graph (Phase 5) draws them all.
-    fileprivate static let listedCommits = 1000
 }
 
 /// The side panels' widths, stored as "sidebar,detail" in `PrefKey.panelWidths`.
@@ -68,8 +66,9 @@ private extension CGFloat {
     func clamped(to range: ClosedRange<CGFloat>) -> CGFloat { Swift.min(Swift.max(self, range.lowerBound), range.upperBound) }
 }
 
-/// A repo tab: sidebar | commit list | detail. Each panel waits for its own data (the refs, the log, the selected
-/// detail) and shows its placeholder until then; a tab switch shows the detail's placeholder in the same frame.
+/// A repo tab: the error banner of a failed operation (when there is one), then sidebar | commit list | detail. Each
+/// panel waits for its own data (the refs, the log, the selected detail) and shows its placeholder until then; a tab
+/// switch shows the detail's placeholder in the same frame.
 struct RepoLayoutView: View {
     let session: RepoSession
     @AppStorage(PrefKey.panelWidths.rawValue, store: Preferences.defaults) private var storedWidths = ""
@@ -84,18 +83,29 @@ struct RepoLayoutView: View {
         GeometryReader { proxy in
             let available = proxy.size.width - RepoLayoutMetrics.chrome
             let widths = (dragWidths ?? PanelWidths(encoded: storedWidths)).fitted(in: available)
-            HStack(spacing: 0) {
-                // Its sections are cards of their own on the window glass, not one panel card.
-                SidebarView(session: session)
-                    .frame(width: widths.sidebar)
-                divider(.sidebar, widths: widths, available: available)
-                CommitListPanel(session: session)
-                    .frame(maxWidth: .infinity)
-                divider(.detail, widths: widths, available: available)
-                DetailPanel(session: session)
-                    .frame(width: widths.detail)
+            VStack(spacing: SectionCardMetrics.spacing) {
+                if let failure = session.failure {
+                    ActionErrorBanner(session: session, failure: failure)
+                }
+                panels(widths: widths, available: available)
             }
             .padding([.horizontal, .bottom], RepoLayoutMetrics.inset)
+        }
+        .operationDialogs(session: session)
+    }
+
+    /// The three panels and their dividers.
+    private func panels(widths: PanelWidths, available: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            // Its sections are cards of their own on the window glass, not one panel card.
+            SidebarView(session: session)
+                .frame(width: widths.sidebar)
+            divider(.sidebar, widths: widths, available: available)
+            CommitListPanel(session: session)
+                .frame(maxWidth: .infinity)
+            divider(.detail, widths: widths, available: available)
+            DetailPanel(session: session)
+                .frame(width: widths.detail)
         }
     }
 
@@ -133,16 +143,18 @@ struct RepoLayoutView: View {
     }
 }
 
-// MARK: - Panel 2: the commit list (Phase 5 replaces it with the graph)
+// MARK: - Panel 2: the commit graph
 
-/// The log's commits as plain rows in one card, the first `RepoLayoutMetrics.listedCommits` of them: a stand-in for
-/// the graph.
+/// The commit graph in one card without a title row: the graph's column titles are its header. Skeleton rows (under a
+/// skeleton header) while the first page loads, then `GraphView` with every row (the WIP and stash rows above the
+/// commits).
 private struct CommitListPanel: View {
     let session: RepoSession
+    @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yyyy @ h:mm a"
+    @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
 
     var body: some View {
-        SectionCard("Commits", count: session.log.value?.commits.count, countIsLoading: isLoading,
-                    contentPadding: 0) {
+        SectionCard(nil, contentPadding: 0) {
             Group {
                 switch session.log {
                 case .idle, .loading:
@@ -151,16 +163,22 @@ private struct CommitListPanel: View {
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel("Loading")
                 case .loaded(let log):
-                    ScrollView {
-                        CommitRows(commits: Array(log.commits.prefix(RepoLayoutMetrics.listedCommits)))
-                        if log.commits.count > RepoLayoutMetrics.listedCommits {
-                            Text("First \(RepoLayoutMetrics.listedCommits) of \(log.commits.count) commits")
-                                .font(.settingsCaption)
-                                .foregroundStyle(.secondary)
-                                .padding(12)
-                        }
-                    }
-                    .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
+                    // A click selects through the session (the detail switches in the same frame); a double-click
+                    // checks out; a right-click opens the row's or the badge's menu; a badge dropped on another opens
+                    // Merge / Rebase / Fast-forward.
+                    GraphView(log: log, refs: session.refs.value, status: session.status.value,
+                              dateFormat: dateFormat, rowDensity: rowDensity, selection: session.graphSelection,
+                              onSelect: { [session] items in session.selectGraph(items) },
+                              onActivate: { [session] item in RepoMenus.activate(item, session: session) },
+                              menuEntries: { [session] item, badge in
+                                  if let ref = badge?.sidebarItem { return RepoMenus.ref(ref, session) }
+                                  return RepoMenus.entries(for: item, session: session)
+                              },
+                              dropEntries: { [session] source, target in
+                                  guard let source = source.sidebarItem, let target = target.sidebarItem else { return [] }
+                                  return RepoMenus.drop(source, onto: target, session)
+                              })
+                        .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
                 case .failed(let message):
                     Label(message, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.secondary)
@@ -170,101 +188,102 @@ private struct CommitListPanel: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
-
-    /// The count's skeleton shows only while the log loads (not once it failed).
-    private var isLoading: Bool {
-        switch session.log {
-        case .idle, .loading: true
-        case .loaded, .failed: false
-        }
-    }
 }
 
-private struct CommitRows: View {
-    let commits: [Commit]
-
-    var body: some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(commits) { commit in
-                HStack(spacing: 8) {
-                    Image(systemName: commit.isMerge ? "circle.circle" : "circle.fill")
-                        .font(.system(size: 7))
-                        .foregroundStyle(.tint)
-                        .frame(width: 12)
-                    Text(commit.subject)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .layoutPriority(1)
-                    Spacer(minLength: 8)
-                    Text(commit.authorName)
-                        .lineLimit(1)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: 120, alignment: .trailing)
-                    Text(commit.hash.prefix(7))
-                        .font(.body.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 26)
-            }
-        }
-    }
-}
-
-/// The commit rows' shape while the log loads: dot, subject (varied widths), author, short hash.
+/// The graph's shape while the log loads: the column titles' row and a hairline, then rows of node, subject (varied
+/// widths), author and date.
 private struct SkeletonCommitRows: View {
     private static let subjects: [CGFloat] = [0.7, 0.5, 0.82, 0.62, 0.45, 0.75, 0.58, 0.66, 0.4, 0.72]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                SkeletonLine(width: 72, height: 8)
+                SkeletonLine(width: 40, height: 8)
+                SkeletonLine(fraction: 0.3, height: 8)
+                SkeletonLine(width: 44, height: 8)
+                SkeletonLine(width: 96, height: 8)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            Divider()
             ForEach(Self.subjects.indices, id: \.self) { index in
                 HStack(spacing: 8) {
-                    SkeletonLine(width: 7, height: 7)
-                        .frame(width: 12)
+                    SkeletonLine(width: 16, height: 16)
+                        .frame(width: 24)
                     SkeletonLine(fraction: Self.subjects[index], height: 11)
                     SkeletonLine(width: index.isMultiple(of: 3) ? 64 : 84, height: 11)
-                    SkeletonLine(width: 52, height: 11)
+                    SkeletonLine(width: 96, height: 11)
                 }
                 .padding(.horizontal, 12)
-                .frame(height: 26)
+                .frame(height: 28)
             }
         }
     }
 }
 
-// MARK: - Panel 3: the detail (Phase 5 adds the WIP and commit panels)
+// MARK: - Panel 3: the detail
 
-/// The selected detail, its parts in cards. For now the repo's overview: HEAD's branch, the history, the working
-/// tree. Until it loads, the same cards hold skeleton rows (`PlaceholderCard`: spinner after 150 ms, the
-/// `placeholder` line); then the `content` line.
+/// The selected detail, its parts in cards: the WIP panel, a commit or stash, a multi-selection count, or the
+/// overview cards (an unborn branch). Until it loads, the selection's cards hold skeleton rows (`PlaceholderCard`:
+/// spinner after 150 ms, the `placeholder` line); then the `content` line. All carry `session.selectDetail`.
 private struct DetailPanel: View {
     let session: RepoSession
     @Environment(WindowModel.self) private var model
 
     var body: some View {
-        ScrollView {
-            Group {
-                switch session.detail {
-                case .idle, .loading:
-                    PlaceholderCard(
-                        token: session.selectToken, detail: timingDetail,
-                        isCurrent: { [model, session] in model.selectedSession === session }
-                    ) {
-                        OverviewCards(branch: nil, path: session.url.path, commits: nil, status: nil)
-                    }
-                case .loaded:
-                    OverviewCards(branch: branch, path: session.url.path, commits: commits, status: session.status.value)
-                        .onAppear { UITiming.content(timingDetail) }
-                case .failed(let message):
-                    FailedCard(message: message, path: session.url.path)
-                        .onAppear { UITiming.content("\(timingDetail) failed") }
+        Group {
+            switch session.detail {
+            case .idle, .loading:
+                PlaceholderCard(
+                    token: session.selectToken, detail: session.selectDetail,
+                    isCurrent: { [model, session] in model.selectedSession === session }
+                ) {
+                    placeholder
                 }
+            case .loaded(let detail):
+                loaded(detail)
+                    .onAppear { UITiming.content(session.selectDetail) }
+            case .failed(let message):
+                FailedCard(message: message, path: session.url.path)
+                    .onAppear { UITiming.content("\(session.selectDetail) failed") }
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The loading selection's cards. A tab that just opened shows the WIP's while its status is unknown or dirty.
+    @ViewBuilder private var placeholder: some View {
+        switch session.selection {
+        case .wip:
+            WIPPlaceholder()
+        case .commit, .stash, .ref:
+            CommitDetailPlaceholder()
+        case .multiple(let count):
+            MultipleSelectionCard(count: count)
+        case .overview:
+            if session.status.value?.entries.isEmpty == true {
+                CommitDetailPlaceholder()
+            } else {
+                WIPPlaceholder()
+            }
         }
     }
 
-    private var timingDetail: String { "overview \(session.url.lastPathComponent)" }
+    @ViewBuilder private func loaded(_ detail: RepoSession.Detail) -> some View {
+        switch detail {
+        case .wip:
+            WIPPanel(session: session)
+        case .commit(let commit):
+            CommitDetailPanel(session: session, commit: commit)
+        case .multiple(let count):
+            MultipleSelectionCard(count: count)
+        case .overview:
+            ScrollView {
+                OverviewCards(branch: branch, path: session.url.path, commits: commits, status: session.status.value)
+            }
+        }
+    }
 
     private var branch: String {
         switch session.refs.value?.head {

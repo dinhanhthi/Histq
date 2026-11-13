@@ -1,6 +1,8 @@
 // A repo tab's sidebar (panel 1): tabs Branches (Local and Remote cards, ahead/behind counts), Tags, and Pull
-// requests & Issues (a hint until GitHub is connected, Phase 11). Each section is its own collapsible card. A click selects a row at once; the branch actions
-// (checkout, menus) come in Phase 5.
+// requests & Issues (a hint until GitHub is connected, Phase 11). Each section is its own collapsible card. A click
+// selects a row at once and the graph jumps to its commit; a double-click checks it out (the single click never waits
+// for it); a right-click opens the same menu as its badge in the graph. The Remote card's header menu adds a remote and
+// renames, removes, re-points or mirrors one.
 import HistqCore
 import SwiftUI
 
@@ -144,26 +146,43 @@ private struct BranchSections: View {
             }
         }
         SidebarSection(title: "Remote", count: refs.remoteBranches.count, isExpanded: $session.remoteExpanded) {
-            if refs.remoteBranches.isEmpty { EmptyRow(text: "No remote branches") }
+            if remotes.isEmpty { EmptyRow(text: "No remotes") }
             ForEach(remotes, id: \.name) { remote in
                 Text(remote.name)
                     .font(.settingsCaption.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.top, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .contextMenu { MenuEntriesView(entries: RepoMenus.remote(named: remote.name, session)) }
                 ForEach(remote.branches, id: \.refName) { branch in
                     BranchRow(session: session, item: .remote(branch.name),
                               name: String(branch.name.dropFirst(remote.name.count + 1)),
                               systemImage: "cloud") { EmptyView() }
                 }
             }
+        } accessory: {
+            Menu {
+                MenuEntriesView(entries: RepoMenus.remotes(session))
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.button)
+            .buttonStyle(RowIconButtonStyle())
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Remotes")
+            .accessibilityLabel("Remote actions")
         }
     }
 
-    /// Remote branches by remote, in the order git listed them.
+    /// Remote branches by remote: the remotes in git's order (also those with no fetched branch), then any other remote
+    /// a branch names.
     private var remotes: [(name: String, branches: [RemoteBranch])] {
-        var order: [String] = []
-        var groups: [String: [RemoteBranch]] = [:]
+        var order: [String] = session.remotes.map(\.name)
+        var groups: [String: [RemoteBranch]] = Dictionary(order.map { ($0, []) }, uniquingKeysWith: { a, _ in a })
         for branch in refs.remoteBranches {
             if groups[branch.remote] == nil { order.append(branch.remote) }
             groups[branch.remote, default: []].append(branch)
@@ -186,12 +205,13 @@ private struct TagRows: View {
 }
 
 /// A section of the sidebar in its own collapsible `SectionCard`: its rows, tightly stacked. `count` nil while the
-/// refs load.
-private struct SidebarSection<Content: View>: View {
+/// refs load. `accessory` sits at the header's end (the Remote card's menu).
+private struct SidebarSection<Content: View, Accessory: View>: View {
     let title: String
     let count: Int?
     @Binding var isExpanded: Bool
     @ViewBuilder let content: () -> Content
+    @ViewBuilder let accessory: () -> Accessory
 
     var body: some View {
         SectionCard(title, count: count, countIsLoading: count == nil, isExpanded: $isExpanded,
@@ -199,7 +219,15 @@ private struct SidebarSection<Content: View>: View {
             VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
                 content()
             }
+        } accessory: {
+            accessory()
         }
+    }
+}
+
+extension SidebarSection where Accessory == EmptyView {
+    init(title: String, count: Int?, isExpanded: Binding<Bool>, @ViewBuilder content: @escaping () -> Content) {
+        self.init(title: title, count: count, isExpanded: isExpanded, content: content, accessory: { EmptyView() })
     }
 }
 
@@ -215,34 +243,48 @@ private struct EmptyRow: View {
     }
 }
 
-/// A selectable row: icon, name (truncated in the middle), then `trailing` (the ahead/behind counts). Selecting it
-/// happens on the click, before anything loads.
+/// A selectable row: icon, name (truncated in the middle), then `trailing` (the ahead/behind counts). A click selects
+/// it and jumps the graph to its commit before anything loads; a double-click checks it out, recognized beside the
+/// single click (`simultaneousGesture`), so the single click never waits for it. Its context menu is its badge's.
 private struct BranchRow<Trailing: View>: View {
     let session: RepoSession
     let item: SidebarItem
     let name: String
     let systemImage: String
     @ViewBuilder let trailing: () -> Trailing
+    @State private var hovered = false
 
     var body: some View {
-        Button {
-            session.selectSidebarItem(item)
-        } label: {
-            Label {
-                HStack(spacing: 4) {
-                    Text(name)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 4)
-                    trailing()
-                }
-            } icon: {
-                Image(systemName: systemImage)
+        let selected = session.sidebarSelection == item
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .frame(width: 20)
+            HStack(spacing: 4) {
+                Text(name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                trailing()
             }
         }
-        .buttonStyle(SidebarItemStyle(selected: session.sidebarSelection == item))
+        .foregroundStyle(selected ? Color.primary : Color.secondary)
+        // The look of `SidebarItemStyle`: a neutral capsule when selected, a hover capsule otherwise.
+        .padding(.horizontal, 10)
+        .frame(minHeight: SidebarItemStyle.height)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
+        .overlay(Capsule().strokeBorder(selected ? Palette.selectedBorder : .clear, lineWidth: 1))
+        .contentShape(Capsule())
+        .animation(Motion.hover, value: hovered)
+        .onHover { hovered = $0 }
+        .onTapGesture { session.selectRef(item) }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { RepoMenus.checkout(item, session) })
+        .contextMenu { MenuEntriesView(entries: RepoMenus.ref(item, session)) }
         .help(name)
-        .accessibilityAddTraits(session.sidebarSelection == item ? .isSelected : [])
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { session.selectRef(item) }
+        .accessibilityAction(named: "Checkout") { RepoMenus.checkout(item, session) }
     }
 }
 
