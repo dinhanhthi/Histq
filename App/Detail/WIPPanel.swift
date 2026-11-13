@@ -37,16 +37,17 @@ struct WIPPanel: View {
         let conflicted = status.map(Self.conflicted) ?? []
         let unstaged = status.map(Self.unstaged) ?? []
         let staged = status.map(Self.staged) ?? []
+        // The panel's height is always used: a card with files scrolls inside and shares the free height equally with
+        // the other cards that have files; an empty card fits its text; the commit box stays at the bottom.
         VStack(spacing: SectionCardMetrics.spacing) {
-            ScrollView {
-                VStack(spacing: SectionCardMetrics.spacing) {
-                    // During an operation the card stays once its files are resolved, saying nothing is left.
-                    if !conflicted.isEmpty || session.repoState?.isOperationInProgress == true {
-                        conflictedCard(conflicted)
-                    }
-                    unstagedCard(unstaged)
-                    stagedCard(staged)
-                }
+            // During an operation the card stays once its files are resolved, saying nothing is left.
+            if !conflicted.isEmpty || session.repoState?.isOperationInProgress == true {
+                conflictedCard(conflicted)
+            }
+            unstagedCard(unstaged)
+            stagedCard(staged)
+            if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
+                Spacer(minLength: 0)
             }
             CommitBox(session: session, stagedCount: staged.count, busy: $busy, error: errorBinding(.commit))
         }
@@ -70,12 +71,16 @@ struct WIPPanel: View {
             if files.isEmpty {
                 EmptyFilesText(text: "No conflicts left")
             } else {
-                FileListView(files: files, repoURL: session.url) { file in
-                    rowButton("checkmark.circle", help: "Mark as Resolved (Stage File)", busy: .stage(file.path)) {
-                        run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
+                FilesScroll {
+                    FileListView(files: files, repoURL: session.url) { file in
+                        rowButton("checkmark.circle", help: "Mark as Resolved (Stage File)", busy: .stage(file.path)) {
+                            run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
+                        }
+                    }
+                    .onSelectFile(selected: openWIPPath) { file in
+                        session.selectFile(FileTarget(source: .wip, file: file))
                     }
                 }
-                .onSelectFile(selected: openWIPPath) { file in session.selectFile(FileTarget(source: .wip, file: file)) }
             }
             ErrorText(message: errors[.conflicted])
         } accessory: {
@@ -88,16 +93,21 @@ struct WIPPanel: View {
             if files.isEmpty {
                 EmptyFilesText(text: "No unstaged changes")
             } else {
-                FileListView(files: files, repoURL: session.url) { file in
-                    HStack(spacing: 10) {
-                        rowButton("arrow.uturn.backward", help: file.kind == .untracked ? "Delete File…" : "Discard Changes…",
-                                  busy: .discard(file.path)) { pendingDiscard = file }
-                        rowButton("plus.circle", help: "Stage File", busy: .stage(file.path)) {
-                            run(.stage([file.path]), busy: .stage(file.path), part: .unstaged)
+                FilesScroll {
+                    FileListView(files: files, repoURL: session.url) { file in
+                        HStack(spacing: 10) {
+                            rowButton("arrow.uturn.backward",
+                                      help: file.kind == .untracked ? "Delete File…" : "Discard Changes…",
+                                      busy: .discard(file.path)) { pendingDiscard = file }
+                            rowButton("plus.circle", help: "Stage File", busy: .stage(file.path)) {
+                                run(.stage([file.path]), busy: .stage(file.path), part: .unstaged)
+                            }
                         }
                     }
+                    .onSelectFile(selected: openWIPPath) { file in
+                        session.selectFile(FileTarget(source: .wip, file: file))
+                    }
                 }
-                .onSelectFile(selected: openWIPPath) { file in session.selectFile(FileTarget(source: .wip, file: file)) }
             }
             ErrorText(message: errors[.unstaged])
         } accessory: {
@@ -115,14 +125,18 @@ struct WIPPanel: View {
             if files.isEmpty {
                 EmptyFilesText(text: "No staged changes")
             } else {
-                FileListView(files: files, repoURL: session.url) { file in
-                    rowButton("minus.circle", help: "Unstage File", busy: .unstage(file.path)) {
-                        // A rename's old path too, or its deletion stays staged.
-                        let paths = [file.originalPath, file.path].compactMap { $0 }
-                        run(.unstage(paths), busy: .unstage(file.path), part: .staged)
+                FilesScroll {
+                    FileListView(files: files, repoURL: session.url) { file in
+                        rowButton("minus.circle", help: "Unstage File", busy: .unstage(file.path)) {
+                            // A rename's old path too, or its deletion stays staged.
+                            let paths = [file.originalPath, file.path].compactMap { $0 }
+                            run(.unstage(paths), busy: .unstage(file.path), part: .staged)
+                        }
+                    }
+                    .onSelectFile(selected: openWIPPath) { file in
+                        session.selectFile(FileTarget(source: .wip, file: file))
                     }
                 }
-                .onSelectFile(selected: openWIPPath) { file in session.selectFile(FileTarget(source: .wip, file: file)) }
             }
             ErrorText(message: errors[.staged])
         } accessory: {
@@ -238,20 +252,23 @@ struct WIPPlaceholder: View {
     var hasConflicts = false
 
     var body: some View {
+        // The loaded panel's shape: the file cards share the height (no scroll views here, the placeholder stays
+        // cheap in the click's frame), the commit box at the bottom.
         VStack(spacing: SectionCardMetrics.spacing) {
             if hasConflicts {
                 SectionCard("Conflicted", systemImage: "exclamationmark.triangle", countIsLoading: true, contentPadding: 6) {
                     SkeletonFileRows(fractions: [0.45, 0.6])
+                        .frame(maxHeight: .infinity, alignment: .top)
                 }
             }
             SectionCard("Unstaged", systemImage: "doc.badge.ellipsis", countIsLoading: true, contentPadding: 6) {
                 SkeletonFileRows(fractions: [0.55, 0.4, 0.65, 0.5])
+                    .frame(maxHeight: .infinity, alignment: .top)
             }
             SectionCard("Staged", systemImage: "tray.full", countIsLoading: true, contentPadding: 6) {
                 SkeletonFileRows(fractions: [0.5, 0.35])
+                    .frame(maxHeight: .infinity, alignment: .top)
             }
-            // The loaded panel pins the commit box to the bottom.
-            Spacer(minLength: 0)
             SectionCard("Commit", systemImage: "checkmark.circle") {
                 VStack(alignment: .leading, spacing: 10) {
                     SkeletonLine(fraction: 1, height: 28)
@@ -400,6 +417,19 @@ private struct CommitBox: View {
 }
 
 // MARK: - Small parts
+
+/// A files card's rows in their own scroll view, so the card takes its share of the panel's height and scrolls inside
+/// instead of the whole panel scrolling.
+private struct FilesScroll<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            content()
+        }
+        .frame(maxHeight: .infinity)
+    }
+}
 
 private struct EmptyFilesText: View {
     let text: String

@@ -291,6 +291,16 @@ final class RepoSession: Identifiable {
     var hostKeyCheck: HostKeyCheck?
     @ObservationIgnored private var nextOperationID = 0
 
+    /// The tab's profile: the id the user picked or the repo resolved to; nil = none (git uses the user's own config).
+    /// The profile itself is looked up in `ProfileLibrary` at each use (`profile`), so a Settings edit reaches the
+    /// tab's next write.
+    private(set) var profileID: UUID?
+    /// The profile store's read when it was still running as the tab opened; a write waits for it, so it never runs
+    /// with no profile before the repo's own is known.
+    @ObservationIgnored private var profileTask: Task<Void, Never>?
+    /// Set once the repo resolved its profile or the user picked one; a late store read then changes nothing.
+    @ObservationIgnored private var profileResolved = false
+
     /// The runner and the folders, set up once (`backend()`).
     @ObservationIgnored private var setUpTask: Task<Backend, Error>?
     @ObservationIgnored private var detailTask: Task<Void, Never>?
@@ -303,6 +313,12 @@ final class RepoSession: Identifiable {
     /// The stashes, read with the refs; nil until the first read. Compared with the log's to reload it when they change.
     @ObservationIgnored private var stashes: [Stash]?
     @ObservationIgnored private let watcher = RepoWatcher()
+    /// The auto-fetch timer while `PrefKey.autoFetchMinutes` is on; cancelled when the tab closes.
+    @ObservationIgnored private var autoFetchTask: Task<Void, Never>?
+    /// The interval the timer runs at; 0 = off.
+    @ObservationIgnored private var autoFetchMinutes = 0
+    /// Watches `PrefKey.autoFetchMinutes`; dropping it (close, deinit) stops the observation.
+    @ObservationIgnored private var preferencesObserver: PreferencesObserver?
 
     /// The file panel2 shows instead of the graph (a click in the WIP panel or a commit's files); nil shows the graph.
     private(set) var openFile: FileTarget?
@@ -334,7 +350,8 @@ final class RepoSession: Identifiable {
         let directories: RepoDirectories
 
         /// The read environment for this folder, built once per load: it lists the repo's filter and diff drivers
-        /// first, so they can be disabled. Phase 7 passes the tab's profile.
+        /// first, so they can be disabled. Never with the tab's profile: a read needs no identity, signing or SSH key,
+        /// and a profile's signing settings have no business in an automatic read of an untrusted repo.
         func readEnvironment(cwd: URL) async throws -> [String: String] {
             try await GitInvocation.readEnvironment(profile: nil, base: base, runner: runner, cwd: cwd)
         }
@@ -342,6 +359,10 @@ final class RepoSession: Identifiable {
 
     init(url: URL) {
         self.url = url
+        resolveProfile()
+        scheduleAutoFetch()
+        // Posted for every key, possibly off the main thread; only a change of the interval restarts the timer.
+        preferencesObserver = PreferencesObserver { [weak self] in self?.scheduleAutoFetch() }
         #if DEBUG
         // `-HistqRun`: menu actions on a fixture copy, once the refs and the whole log are in.
         if let spec = AppState.launchFlag("-HistqRun") {
@@ -352,6 +373,26 @@ final class RepoSession: Identifiable {
                 }
                 guard let self else { return }
                 await RepoMenus.debugRun(spec, session: self)
+            }
+        }
+        // `-HistqCommit "<message>"`: commits the staged changes of a fixture copy through the WIP panel's write path
+        // (with the tab's profile), once the status is read; the outcome goes to `operations.txt`.
+        if let message = AppState.launchFlag("-HistqCommit") {
+            Task { [weak self] in
+                for _ in 0..<100 {
+                    if self?.status.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                guard let self else { return }
+                let outcome: String
+                do {
+                    try await perform(.commit(message: message))
+                    outcome = "ok commit"
+                } catch {
+                    outcome = "fail commit: \(Self.writeMessage(for: error))"
+                }
+                let file = StatePaths.root.appending(path: "operations.txt", directoryHint: .notDirectory)
+                try? Data((outcome + "\n").utf8).write(to: file)
             }
         }
         // `-HistqOperation`: the operation banner's buttons on a fixture copy, once the state is read.
@@ -375,9 +416,11 @@ final class RepoSession: Identifiable {
         refreshTask?.cancel()
         logTask?.cancel()
         setUpTask?.cancel()
+        autoFetchTask?.cancel()
+        profileTask?.cancel()
     }
 
-    /// Stops loading and watching; the tab closed.
+    /// Stops loading, watching and auto-fetching; the tab closed.
     func close() {
         watcher.stop()
         detailTask?.cancel()
@@ -385,6 +428,137 @@ final class RepoSession: Identifiable {
         refreshTask?.cancel()
         logTask?.cancel()
         setUpTask?.cancel()
+        autoFetchTask?.cancel()
+        autoFetchTask = nil
+        preferencesObserver = nil
+        profileTask?.cancel()
+    }
+
+    // MARK: Profile
+
+    /// The tab's profile as the store has it now. An id the store no longer has (the profile was deleted) falls back
+    /// to the default profile, as deleting it promised; nil while the store is not read.
+    var profile: Profile? {
+        guard let profileID, let store = ProfileLibrary.shared.store else { return nil }
+        return store.profile(id: profileID) ?? store.defaultProfile
+    }
+
+    /// Resolves the repo's remembered profile, else the default: from memory when the store is read (it is read at
+    /// launch), else once its read ends. Only here and after that read: `profile(forRepo:)` resolves the real path.
+    private func resolveProfile() {
+        let library = ProfileLibrary.shared
+        if let store = library.store {
+            profileID = store.profile(forRepo: url)?.id
+            profileResolved = true
+            return
+        }
+        profileTask = Task { [weak self] in
+            let store = await library.loaded()
+            guard let self, !profileResolved else { return }
+            profileID = store?.profile(forRepo: url)?.id
+            profileResolved = true
+        }
+    }
+
+    /// The profile picker's click: the tab shows `id` at once, the next write uses it, and the repo remembers it (the
+    /// store saves off the main thread). nil = none; the repo then forgets its profile and opens with the default.
+    func setProfile(_ id: UUID?) {
+        profileResolved = true
+        profileTask?.cancel()
+        profileTask = nil
+        if profileID != id { profileID = id }
+        let url = url
+        Task {
+            // A pick before the store is read is saved once it is.
+            let library = ProfileLibrary.shared
+            guard await library.loaded() != nil else { return }
+            library.update { $0.remember(id, forRepo: url) }
+        }
+    }
+
+    /// The profile a write runs with: waits for the store's first read when the tab opened before it ended.
+    private func writeProfile() async -> Profile? {
+        await profileTask?.value
+        return profile
+    }
+
+    // MARK: Auto-fetch
+
+    /// A `UserDefaults.didChangeNotification` observation of `Preferences.defaults` that ends when it is released.
+    private final class PreferencesObserver: @unchecked Sendable {
+        /// Only read in `deinit`; `removeObserver` is thread-safe.
+        private let token: NSObjectProtocol
+
+        init(_ onChange: @escaping @MainActor () -> Void) {
+            token = NotificationCenter.default.addObserver(
+                forName: UserDefaults.didChangeNotification, object: Preferences.defaults, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated { onChange() }
+            }
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    /// Starts, restarts or stops the auto-fetch timer when `PrefKey.autoFetchMinutes` changed. Only the offered
+    /// intervals count; any other value (a hand-written default) reads as off, so it can never fetch in a tight loop.
+    private func scheduleAutoFetch() {
+        let stored = Preferences.defaults.integer(forKey: PrefKey.autoFetchMinutes.rawValue)
+        let minutes = [5, 10, 30].contains(stored) ? stored : 0
+        guard minutes != autoFetchMinutes else { return }
+        autoFetchMinutes = minutes
+        autoFetchTask?.cancel()
+        autoFetchTask = nil
+        guard minutes > 0 else { return }
+        autoFetchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard (try? await Task.sleep(for: .seconds(minutes * 60))) != nil else { return }
+                await self?.autoFetch()
+            }
+        }
+    }
+
+    /// One automatic fetch: skipped while a user operation runs; a failure is only logged (the error banner is for
+    /// the user's own operations). It shows as running (the action bar's spinner and title), so a user write that
+    /// waits behind it in the write lane does not wait silently.
+    private func autoFetch() async {
+        guard running.isEmpty else { return }
+        let prune = Preferences.defaults.bool(forKey: PrefKey.pruneOnFetch.rawValue)
+        nextOperationID &+= 1
+        let operation = RunningOperation(id: nextOperationID, title: "Auto-fetch", key: nil)
+        running.append(operation)
+        defer { running.removeAll { $0.id == operation.id } }
+        do {
+            let backend = try await backend()
+            let profile = await writeProfile()
+            try await Self.autoFetch(prune: prune, profile: profile, backend: backend, cwd: url)
+        } catch {
+            if !Self.isCancellation(error) {
+                Self.logger.notice("auto-fetch failed: \(Self.message(for: error), privacy: .public)")
+            }
+            return
+        }
+        refresh(scope: [.status, .refs])
+    }
+
+    /// `git fetch --all [--prune]` in the write lane with the background fetch environment and the tab's profile (a
+    /// fetch is network: the profile's SSH key). Nobody clicked it in a repo that may be downloaded, so the repo's
+    /// config, hooks and credential helpers run nothing (see `GitInvocation.Access.backgroundFetch`), and no gc or
+    /// maintenance runs after it. A failure to list the user's credential helpers, or a repo that sets its own http or
+    /// proxy config, skips the tick (logged; a click on Fetch still fetches). Two minutes at most, so it never holds
+    /// the write lane long.
+    @concurrent
+    private nonisolated static func autoFetch(prune: Bool, profile: Profile?, backend: Backend, cwd: URL) async throws {
+        let base = await GitToolchain.writeBase()
+        let runner = backend.runner
+        let environment = try await GitInvocation.backgroundFetchEnvironment(
+            profile: profile, base: base, runner: runner, cwd: cwd)
+        let args = ["fetch", "--all"] + (prune ? ["--prune"] : [])
+        _ = try await runner.mutate {
+            try await runner.run(args, cwd: cwd, env: environment, timeout: .seconds(120))
+        }
     }
 
     // MARK: Select
@@ -1439,8 +1613,10 @@ final class RepoSession: Identifiable {
     /// done part of its work). Throws the write's error; `writeMessage(for:)` words it for the panel.
     func perform(_ write: Write) async throws {
         let backend = try await backend()
+        // The profile as it is when the write starts; its environment is built off the main actor in `run`.
+        let profile = await writeProfile()
         do {
-            try await Self.run(write, backend: backend, cwd: url)
+            try await Self.run(write, profile: profile, backend: backend, cwd: url)
         } catch {
             await refreshAfterWrite()
             throw error
@@ -1454,10 +1630,11 @@ final class RepoSession: Identifiable {
     }
 
     @concurrent
-    private nonisolated static func run(_ write: Write, backend: Backend, cwd: URL) async throws {
+    private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws {
         let base = await GitToolchain.writeBase()
-        let ops = GitOperations(
-            runner: backend.runner, cwd: cwd, env: GitInvocation.environment(profile: nil, base: base))
+        // The tab's identity, signing and SSH key, as command-scope config: `.git/config` is never edited.
+        let environment = GitInvocation.environment(profile: profile, base: base)
+        let ops = GitOperations(runner: backend.runner, cwd: cwd, env: environment)
         switch write {
         case .stage(let paths): try await ops.stage(paths)
         case .stageAll: try await ops.stageAll()
@@ -1470,9 +1647,7 @@ final class RepoSession: Identifiable {
         case .amend(let message): try await ops.amend(message: message)
         case .applyPatch(let patch, let action):
             // `apply` takes the runner's write lane itself, like the operations.
-            try await PatchBuilder.apply(
-                patch, action: action, runner: backend.runner, cwd: cwd,
-                env: GitInvocation.environment(profile: nil, base: base))
+            try await PatchBuilder.apply(patch, action: action, runner: backend.runner, cwd: cwd, env: environment)
 
         case .checkoutBranch(let name): try await ops.checkout(branch: name)
         case .checkoutTracking(let remoteBranch, let localName):
@@ -1525,11 +1700,10 @@ final class RepoSession: Identifiable {
             try writeResolution(content, to: path, cwd: cwd)
             try await ops.stage([path])
         case .mergeTool(let path, let tool):
-            let env = GitInvocation.environment(profile: nil, base: base)
             let runner = backend.runner
             let args = ["--literal-pathspecs", "mergetool", "--no-prompt"] + (tool.map { ["--tool=\($0)"] } ?? [])
                 + ["--", path]
-            _ = try await runner.mutate { try await runner.run(args, cwd: cwd, env: env) }
+            _ = try await runner.mutate { try await runner.run(args, cwd: cwd, env: environment) }
 
         case .continueOperation(let operation): try await ops.continueOperation(operation)
         case .abortOperation(let operation): try await ops.abortOperation(operation)
@@ -1766,6 +1940,9 @@ final class RepoSession: Identifiable {
             case .noOperationInProgress: "No merge, rebase, cherry-pick or revert is in progress."
             case .unsupported(let what): "Not supported: \(what)."
             }
+        case GitInvocation.BackgroundFetchError.repoSetsNetworkConfig(let keys):
+            "The repo sets its own http or proxy config (\(keys.joined(separator: ", "))); "
+                + "auto-fetch skipped, fetch manually."
         case let error as HostKeyTrust.TrustError:
             switch error {
             case .invalidHost(let host): "\(host) is not a host name Histq can check."

@@ -61,6 +61,26 @@ struct GitInvocationTests {
         #expect(argv == ["-o", "BatchMode=yes", "-i", keyPath, "-o", "IdentitiesOnly=yes"])
     }
 
+    @Test(
+        "a signing method with a blank key and sign-by-default gives git no user.signingKey and no signing",
+        arguments: [Profile.Signing.gpg(keyID: ""), .gpg(keyID: "  "), .ssh(keyPath: ""), .ssh(keyPath: " \n")])
+    func blankSigningKeyDoesNotSign(signing: Profile.Signing) async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        var profile = Self.profile
+        profile.signing = signing
+        profile.signByDefault = true
+        let env = GitInvocation.environment(profile: profile, base: sandbox.base)
+
+        // Exit 1: the key is not set in any scope.
+        let key = try await sandbox.runner.run(
+            ["config", "--get", "user.signingKey"], cwd: repo, env: env, allowedExitCodes: [0, 1])
+        #expect(key.exitCode == 1, "user.signingKey: \(key.text)")
+        let sign = try await sandbox.runner.run(["config", "--get", "commit.gpgSign"], cwd: repo, env: env)
+        #expect(sign.text.trimmingCharacters(in: .whitespacesAndNewlines) == "false")
+    }
+
     // MARK: - Untrusted repo config
 
     @Test("a repo's core.fsmonitor hook does not run during a read")

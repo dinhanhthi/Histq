@@ -1,5 +1,6 @@
 // The card every part of a panel sits in: the repo sidebar's sections, the commit list, the detail's parts, the
-// Welcome page's parts. Cards stack with `SectionCardMetrics.spacing` between them, on the window glass.
+// Welcome page's parts. Cards stack with `SectionCardMetrics.spacing` between them, in a repo panel's
+// `PanelContainer` (below) or on the window glass (Welcome).
 import SwiftUI
 
 enum SectionCardMetrics {
@@ -117,4 +118,29 @@ extension SectionCard where Accessory == EmptyView {
         self.init(title, systemImage: systemImage, count: count, countIsLoading: countIsLoading, isExpanded: isExpanded,
                   contentPadding: contentPadding, content: content, accessory: { EmptyView() })
     }
+}
+
+/// The outer container of a repo panel (sidebar, graph / diff / conflict editor, detail) and of the tab row: a
+/// rounded `Palette.bgCard` fill with a 1 pt `surfaceBorder` edge, `padding` inside it. Its cards sit one step above
+/// it, so the window, the container and the cards read as three levels. A flat fill on purpose: no material, glass
+/// effect or shadow, which would add work to every redraw of the click's frame. The default radius keeps the corners
+/// concentric with the cards' (`SettingsMetrics.cardRadius` + `padding`).
+struct PanelContainer<Content: View>: View {
+    var padding: CGFloat = PanelContainerMetrics.padding
+    var cornerRadius: CGFloat?
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        let radius = cornerRadius ?? SettingsMetrics.cardRadius + padding
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        content()
+            .padding(padding)
+            .background(shape.fill(Palette.bgCard))
+            .overlay(shape.strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
+    }
+}
+
+enum PanelContainerMetrics {
+    /// Between a container's edge and the cards inside it.
+    static let padding: CGFloat = 6
 }

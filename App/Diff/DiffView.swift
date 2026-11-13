@@ -175,8 +175,7 @@ private struct DiffHeaderCard: View {
     }
 }
 
-/// The loaded diff: a card per side (each as tall as its rows, sharing the panel when they do not fit), or a card that
-/// says why there are no lines.
+/// The loaded diff: a card per side (filling the panel together), or a card that says why there are no lines.
 private struct DiffContent: View {
     let session: RepoSession
     let detail: FileDiffDetail
@@ -184,11 +183,15 @@ private struct DiffContent: View {
     var body: some View {
         switch detail.content {
         case .sections(let sections):
+            // The cards with lines fill panel2 and share its height equally (each table scrolls); a side without
+            // lines fits its text.
             VStack(spacing: SectionCardMetrics.spacing) {
                 ForEach(sections) { section in
                     sectionCard(section)
                 }
-                Spacer(minLength: 0)
+                if sections.allSatisfy({ $0.rows(session.diffMode).isEmpty }) {
+                    Spacer(minLength: 0)
+                }
             }
         case .binary:
             DiffNoticeCard(title: "Binary file", systemImage: "doc.zipper",
@@ -211,9 +214,6 @@ private struct DiffContent: View {
 
     private func sectionCard(_ section: DiffSection) -> some View {
         let rows = section.rows(session.diffMode)
-        let height = rows.reduce(0) { $0 + ($1.isLine ? DiffLayout.lineHeight : DiffLayout.hunkHeight) }
-        // The card's header (32) and the horizontal scroller's room (12) above the rows.
-        let ideal = 32 + max(height, DiffLayout.lineHeight) + 12
         return SectionCard(section.side.title, systemImage: section.side.systemImage, contentPadding: 0) {
             if rows.isEmpty {
                 Text(modeOnlyText(section))
@@ -238,7 +238,6 @@ private struct DiffContent: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(section.additions) added, \(section.deletions) removed")
         }
-        .frame(maxHeight: rows.isEmpty ? nil : ideal)
     }
 
     /// A side without lines: a mode change, or an empty file added or deleted.
@@ -266,6 +265,8 @@ private struct DiffNoticeCard<Action: View>: View {
                     .textSelection(.enabled)
                 action()
             }
+            // Fills panel2 like the line cards, no empty space below.
+            .frame(maxHeight: .infinity, alignment: .topLeading)
         }
     }
 }
@@ -301,8 +302,9 @@ private struct DiffPlaceholder: View {
                     }
                 }
                 .padding(.bottom, 8)
+                // The loaded cards fill panel2: so does their skeleton.
+                .frame(maxHeight: .infinity, alignment: .top)
             }
-            Spacer(minLength: 0)
         }
     }
 }

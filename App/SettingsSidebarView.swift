@@ -1,54 +1,53 @@
 // The Settings page, sidebar layout: the sections in a raised card, the selected one's cards on the right over the
 // window's glass; each change is saved at once.
-import AppKit
 import SwiftUI
 
 /// The Settings page `MainView` shows; the tab layout defines the same name.
 typealias SettingsRoot = SettingsSidebarView
 
-/// A sidebar section. Adding one: a case, its row in `label`, its page in `SettingsSidebarView.content`.
-private enum SettingsSection: CaseIterable, Identifiable {
-    case appearance, general, advanced
+/// A sidebar section. Adding one: a case (its raw value is the `-HistqSelect settings:<section>` value), its row in
+/// `label`, its page in `SettingsSidebarView.content`.
+enum SettingsSection: String, CaseIterable, Identifiable {
+    case general, appearance, profiles, ssh
 
     var id: Self { self }
 
     var label: (title: String, icon: String) {
         switch self {
-        case .appearance: ("Appearance", "paintbrush")
         case .general: ("General", "gearshape")
-        case .advanced: ("Advanced", "wrench.and.screwdriver")
+        case .appearance: ("Appearance", "paintbrush")
+        case .profiles: ("Profiles", "person.crop.circle")
+        case .ssh: ("SSH", "key")
         }
     }
 }
 
 struct SettingsSidebarView: View {
-    // Sample settings: replace them with the app's own.
-    @AppStorage("ShowPreviews", store: Preferences.defaults) private var showPreviews = true
-    @AppStorage("ConfirmDelete", store: Preferences.defaults) private var confirmDelete = true
-    @AppStorage("DisplayName", store: Preferences.defaults) private var displayName = ""
-    @AppStorage("VerboseLogging", store: Preferences.defaults) private var verboseLogging = false
-    @State private var advancedExpanded = false
-    @State private var section = SettingsSection.appearance
+    @Environment(WindowModel.self) private var model
     /// Sections opened so far: kept alive like TabView's tabs, so a section keeps its state (and its scroll) when
     /// the user comes back to it.
     @State private var opened: Set<SettingsSection> = []
+    /// The profile the Profiles and SSH pages edit, shared so both show the same one.
+    @State private var profileID: UUID?
     @FocusState private var sidebarFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// The sample modal. Every modal's flag goes into `modalOpen`.
-    @State private var showingDetails = false
+    /// The profile whose "Generate Key" modal is open. Every modal's flag goes into `modalOpen`.
+    @State private var generatingFor: UUID?
     /// The page's width, for the modal's card.
     @State private var containerWidth: CGFloat = 0
     /// The page's blur behind an open modal, animated alone in `onChange(of: modalOpen)`.
     @State private var backdropBlur: CGFloat = 0
 
-    private var modalOpen: Bool { showingDetails }
+    private var section: SettingsSection { model.settingsSection }
+    private var modalOpen: Bool { generatingFor != nil }
 
     var body: some View {
         ZStack {
             HStack(alignment: .top, spacing: 0) {
                 sidebar
                 ZStack {
-                    ForEach(SettingsSection.allCases.filter(opened.contains)) { page in
+                    // The selected section is mounted in the same update as the click, before `opened` records it.
+                    ForEach(SettingsSection.allCases.filter { opened.contains($0) || $0 == section }) { page in
                         let selected = page == section
                         ScrollView {
                             VStack(alignment: .leading, spacing: SettingsMetrics.cardSpacing) {
@@ -83,19 +82,23 @@ struct SettingsSidebarView: View {
                 }
             }
 
-            // Sample modal: replace it with the app's own. It fills this page, under the toolbar's band (see
-            // window-toolbar.md, Modal).
-            SettingsModal(isPresented: showingDetails, containerWidth: containerWidth,
-                          onDismiss: { showingDetails = false }) {
-                DetailsModalContent { withAnimation(Motion.sheet) { showingDetails = false } }
+            // It fills this page, under the toolbar's band (see window-toolbar.md, Modal).
+            SettingsModal(isPresented: modalOpen, containerWidth: containerWidth, dismissOnBackdropTap: false,
+                          onDismiss: { generatingFor = nil }) {
+                if let id = generatingFor {
+                    GenerateKeyModal(profileID: id) { withAnimation(Motion.sheet) { generatingFor = nil } }
+                }
             }
         }
         // Esc before the card's own focus lands still closes the open modal.
         .onExitCommand {
             guard modalOpen else { return }
-            withAnimation(Motion.sheet) { showingDetails = false }
+            withAnimation(Motion.sheet) { generatingFor = nil }
         }
-        .onAppear { sidebarFocused = true }
+        .onAppear {
+            sidebarFocused = true
+            ProfileLibrary.shared.loadIfNeeded()
+        }
         .onChange(of: section, initial: true) { _, new in opened.insert(new) }
         .onChange(of: modalOpen) { _, open in
             // The sidebar was disabled behind the modal: take the focus back on the next turn.
@@ -113,7 +116,7 @@ struct SettingsSidebarView: View {
         VStack(alignment: .leading, spacing: SidebarItemStyle.spacing) {
             ForEach(SettingsSection.allCases) { row in
                 Button {
-                    section = row
+                    if row != section { model.selectSettings(row) }
                     sidebarFocused = true
                 } label: {
                     Label(row.label.title, systemImage: row.label.icon)
@@ -142,8 +145,8 @@ struct SettingsSidebarView: View {
         let all = SettingsSection.allCases
         guard let index = all.firstIndex(of: section) else { return }
         switch direction {
-        case .up where index > all.startIndex: section = all[index - 1]
-        case .down where index < all.count - 1: section = all[index + 1]
+        case .up where index > all.startIndex: model.selectSettings(all[index - 1])
+        case .down where index < all.count - 1: model.selectSettings(all[index + 1])
         default: break
         }
     }
@@ -157,117 +160,115 @@ struct SettingsSidebarView: View {
     @ViewBuilder
     private func content(_ section: SettingsSection) -> some View {
         switch section {
-        case .appearance:
-            // Histq is dark only. Phase 7 adds the avatar mode, the date format and the row density here.
-            SettingsGroup("Appearance") {
-                Text("More appearance options come later.")
-                    .foregroundStyle(.secondary)
-            }
-        case .general:
-            SettingsGroup("General", description: "Each change is saved at once.") {
-                switchRow(isOn: $showPreviews, title: "Show previews",
-                          hint: "Shows a preview of each item in the list.")
-                SettingsDivider()
-                switchRow(isOn: $confirmDelete, title: "Confirm before deleting", hint: nil)
-                SettingsDivider()
-                LabeledContent {
-                    TextField("Name", text: $displayName, prompt: Text("Your name"))
-                        .textFieldStyle(.settings)
-                        .frame(maxWidth: 220)
-                        .labelsHidden()
-                } label: {
-                    Text("Display name")
-                    hint("Shown in the window's title.")
-                }
-                SettingsDivider()
-                LabeledContent {
-                    Button("Reveal in Finder", action: revealInFinder)
-                        .buttonStyle(RowTextButtonStyle(formRow: true))
-                } label: {
-                    Text("App")
-                    hint("Shows the app in a Finder window.")
-                }
-            }
-        case .advanced:
-            SettingsGroup("Advanced") {
-                DisclosureGroup(isExpanded: $advancedExpanded) {
-                    switchRow(isOn: $verboseLogging, title: "Verbose logging",
-                              hint: "Writes more detail to the system log.")
-                        .padding(.leading, TitleChevronDisclosureStyle.indent)
-                        .padding(.top, 6)
-                } label: {
-                    Text("Diagnostics")
-                    hint("Options for tracking down a problem.")
-                }
-                .disclosureGroupStyle(TitleChevronDisclosureStyle())
-                SettingsDivider()
-                LabeledContent {
-                    Button("Show Details") { withAnimation(Motion.sheet) { showingDetails = true } }
-                        .buttonStyle(RowTextButtonStyle(formRow: true))
-                } label: {
-                    Text("Details")
-                    hint("Opens a modal over the page.")
-                }
+        case .general: GeneralSettings()
+        case .appearance: AppearanceSettings()
+        case .profiles: ProfilesSettings(profileID: $profileID)
+        case .ssh:
+            SSHSettings(profileID: $profileID, onShowProfiles: { model.selectSettings(.profiles) }) { id in
+                withAnimation(Motion.sheet) { generatingFor = id }
             }
         }
     }
+}
 
-    /// A row with a title, an optional hint under it, and a `CompactSwitch` (which draws no label of its own).
-    private func switchRow(isOn: Binding<Bool>, title: String, hint: String?) -> some View {
+/// A settings section's loading state and timing lines: once `isLoaded`, the content, logging
+/// `content settings <section>` when it shows and at each select of the section; before, `skeleton` (capsule bars in
+/// the content's layout) with a delayed spinner, logging `placeholder settings <section>`. Hidden sections (kept alive
+/// behind the selected one) log nothing.
+struct SettingsPageGate<Content: View, Skeleton: View>: View {
+    let section: SettingsSection
+    let isLoaded: Bool
+    @ViewBuilder let content: () -> Content
+    @ViewBuilder let skeleton: () -> Skeleton
+    @Environment(WindowModel.self) private var model
+
+    private var detail: String { "settings \(section.rawValue)" }
+
+    private var isSelected: Bool {
+        model.navigation.page == .settings && model.settingsSection == section
+    }
+
+    var body: some View {
+        if isLoaded {
+            VStack(alignment: .leading, spacing: SettingsMetrics.cardSpacing) {
+                content()
+            }
+            .onChange(of: model.settingsToken, initial: true) {
+                if isSelected { UITiming.content(detail) }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: SettingsMetrics.cardSpacing) {
+                skeleton()
+            }
+            .allowsHitTesting(false)
+            .overlay { DelayedSpinner(detail: detail, isCurrent: { isSelected }) }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading")
+            .onChange(of: model.settingsToken, initial: true) {
+                if isSelected { UITiming.placeholder(detail) }
+            }
+        }
+    }
+}
+
+/// A skeleton settings card: a title bar, then `rows` rows of a title bar and a control bar, in a `SettingsGroup`'s
+/// shape.
+struct SettingsSkeletonGroup: View {
+    var rows = 2
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SkeletonLine(width: 90, height: 13)
+                .padding(.horizontal, SettingsMetrics.cardPadding)
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(0..<rows, id: \.self) { row in
+                    if row > 0 { SettingsDivider() }
+                    HStack {
+                        SkeletonLine(width: 140 - CGFloat(row % 3) * 24, height: 12)
+                        Spacer(minLength: 12)
+                        SkeletonLine(width: 110, height: 20)
+                    }
+                    .frame(minHeight: 24)
+                }
+            }
+            .padding(.horizontal, SettingsMetrics.cardPadding)
+            .padding(.vertical, SettingsMetrics.rowPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius))
+        }
+    }
+}
+
+/// A row with a title, an optional hint under it, and a `CompactSwitch` (which draws no label of its own).
+struct SettingsSwitchRow: View {
+    let title: String
+    var hint: String?
+    @Binding var isOn: Bool
+
+    var body: some View {
         LabeledContent {
-            Toggle(title, isOn: isOn)
+            Toggle(title, isOn: $isOn)
                 .toggleStyle(CompactSwitch())
                 .labelsHidden()
         } label: {
             Text(title)
-            if let hint { self.hint(hint) }
+            if let hint { SettingsHint(hint) }
         }
-    }
-
-    /// The hint under a row's title.
-    private func hint(_ text: String) -> some View {
-        Text(text)
-            .font(.settingsCaption)
-            .foregroundStyle(.secondary)
-    }
-
-    private func revealInFinder() {
-        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
     }
 }
 
-/// Sample modal content: a header at the top of the card, a divider, and a scrolling body. Replace it.
-private struct DetailsModalContent: View {
-    let onClose: () -> Void
-    /// The card holds the focus while it is open (it has no field), so Esc reaches the modal.
-    @FocusState private var focused: Bool
+/// The hint under a row's title.
+struct SettingsHint: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Details")
-                    .font(.title2.weight(.semibold))
-                Spacer(minLength: 0)
-                Button("Done", action: onClose)
-                    .buttonStyle(BottomBarButtonStyle(height: 28, prominent: true, horizontalPadding: 12))
-            }
-            // Symmetric vertical padding at the top of the card.
-            .padding(.horizontal, SettingsMetrics.cardPadding)
-            .padding(.vertical, SettingsMetrics.cardPadding + 6)
-            Divider()
-            ScrollView {
-                Text("The modal sets the card's height; this body scrolls inside it.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(SettingsMetrics.pagePadding)
-            }
-        }
-        // No minimum height: the modal sets it.
-        .frame(minWidth: 480)
-        .focusable()
-        .focusEffectDisabled()
-        .focused($focused)
-        // Next run-loop turn, once the card is in the window.
-        .onAppear { DispatchQueue.main.async { focused = true } }
+        Text(text)
+            .font(.settingsCaption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }

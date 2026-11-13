@@ -1,6 +1,6 @@
 // The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge the repo
-// menu (the window's repo tabs, recent repos, Open…) and the branch menu (checks out the picked branch), as in
-// GitKraken; at the trailing edge capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
+// menu (the window's repo tabs, recent repos, Open…), the branch menu (checks out the picked branch), as in GitKraken,
+// and the tab's profile chip (`ProfilePicker`); at the trailing edge capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
 // Terminal / Search / Settings. The set of items never changes: on a Welcome tab, Settings or About the repo actions
 // are disabled, not removed.
 //
@@ -21,6 +21,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     private let repoItem = NSMenuToolbarItem(itemIdentifier: ID.repo)
     private let branchItem = NSMenuToolbarItem(itemIdentifier: ID.branch)
+    private let profileItem = NSMenuToolbarItem(itemIdentifier: ID.profile)
+    /// The color the profile chip's dot shows ("" for no profile), so the image is only redrawn when it changes.
+    private var profileDot: String?
     private let undoItem = NSToolbarItem(itemIdentifier: ID.undo)
     private let redoItem = NSToolbarItem(itemIdentifier: ID.redo)
     private let pullItem = NSMenuToolbarItem(itemIdentifier: ID.pull)
@@ -43,6 +46,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private enum ID {
         static let repo = NSToolbarItem.Identifier("repo")
         static let branch = NSToolbarItem.Identifier("branch")
+        static let profile = NSToolbarItem.Identifier("profile")
         static let undo = NSToolbarItem.Identifier("undo")
         static let redo = NSToolbarItem.Identifier("redo")
         static let pull = NSToolbarItem.Identifier("pull")
@@ -75,9 +79,15 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     private func configureItems() {
         configureMenu(repoItem, label: "Repository")
         configureMenu(branchItem, label: "Branch")
+        configureMenu(profileItem, label: "Profile")
+        // An icon at the left of the title, inside the button, as the profile chip has its dot. Template symbols, so
+        // they take the toolbar's text color.
+        repoItem.image = NSImage(systemSymbolName: "book.closed", accessibilityDescription: "Repository")
+        branchItem.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")
         // Kept out of the overflow menu longer than the buttons.
         repoItem.visibilityPriority = .high
         branchItem.visibilityPriority = .high
+        profileItem.visibilityPriority = .high
 
         // Phase 9 wires Undo and Redo to the operation journal; Phase 13 opens the repo in a terminal; the Phase 8
         // palette opens from Search.
@@ -148,7 +158,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         // On macOS 26 a fixed space starts a new capsule; before, there are no capsules to separate.
         let gap: [NSToolbarItem.Identifier] = PlatformFeatures.liquidGlass ? [.space] : []
-        return [ID.repo, ID.branch, .flexibleSpace, ID.historyGroup] + gap + [ID.syncGroup] + gap + [ID.branchGroup]
+        return [ID.repo, ID.branch, ID.profile, .flexibleSpace, ID.historyGroup] + gap + [ID.syncGroup] + gap + [ID.branchGroup]
             + gap + [ID.toolsGroup]
     }
 
@@ -162,6 +172,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         switch itemIdentifier {
         case ID.repo: repoItem
         case ID.branch: branchItem
+        case ID.profile: profileItem
         default: groups[itemIdentifier]
         }
     }
@@ -169,8 +180,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: State
 
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
-    /// selected tab's title, its session's refs, running operations, status, stashes and remotes, and the page are
-    /// read, so other tabs and the content's own state never wake the toolbar.
+    /// selected tab's title, its session's refs, running operations, status, stashes, remotes and profile, the
+    /// profile store, and the page are read, so other tabs and the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
             apply()
@@ -192,6 +203,19 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             set(branchItem, title: Self.truncated(Self.branchTitle(session.refs.value?.head), 32))
             set(branchItem, enabled: !isBusy && session.refs.value != nil)
             set(branchItem, toolTip: isBusy ? "Checking out…" : "Check out another branch")
+        }
+
+        // Hidden, like the branch menu, where no repo tab shows (Welcome, Settings, About).
+        set(profileItem, hidden: session == nil)
+        if let session {
+            let profile = session.profile
+            set(profileItem, title: Self.truncated(ProfilePicker.title(profile), 24))
+            set(profileItem, toolTip: ProfilePicker.toolTip(profile))
+            let dot = profile?.color ?? ""
+            if profileDot != dot {
+                profileDot = dot
+                profileItem.image = ProfilePicker.dot(hex: profile?.color)
+            }
         }
 
         for (item, action) in actionItems {
@@ -284,6 +308,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         let entries: [MenuEntry] = switch menu {
         case repoItem.menu: repoEntries()
         case branchItem.menu: model.actionSession.map(RepoMenus.branchPicker) ?? []
+        case profileItem.menu: model.actionSession.map { ProfilePicker.entries(session: $0, model: model) } ?? []
         case pullItem.menu: pullEntries()
         case pushItem.menu: pushEntries()
         default: []
@@ -297,6 +322,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             menu.removeItem(at: index)
             menu.insertItem(NSMenuItem.sectionHeader(title: "Recent"), at: index)
         }
+        if menu === profileItem.menu { ProfilePicker.decorate(menu) }
     }
 
     /// Stands for the "Recent" section header in `repoEntries`, which `MenuEntry` cannot express.

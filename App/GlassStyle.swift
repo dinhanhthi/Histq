@@ -39,11 +39,19 @@ enum Palette {
     static let scrim = color(.black.withAlphaComponent(0.45))
     /// Text and glyphs on the gold accent fill: primary buttons, the selected tab (user decision 2026-11-13: white).
     static let onAccent = color(.white)
+    /// The fill of primary buttons (Commit, Save, Keep File): a deeper gold leaning to orange, so their white label
+    /// reads at 4.68:1 (WCAG AA for body text). Not the accent: #FDBB07 under white text is only 1.71:1, but the
+    /// selected pills, the switches and the focus ring keep it. #A86400
+    static let primaryFill = color(srgb(0xA86400))
     static let switchOffFill = color(.white.withAlphaComponent(0.22))
     /// The shadow of the switch's white knob.
     static let knobShadow = Color.black.opacity(0.2)
     /// Cards and panels, a step above the window. #2C2C2E
     static let surface = color(srgb(0x2C2C2E))
+    /// bg_card: the outer container of each repo panel and of the tab row (`PanelContainer`), between the window and
+    /// the cards on it, so the three read as separate calm levels (EchoDiar's panels on the window glass). Opaque like
+    /// `surface`: one `WindowGlass` per window, no second translucent layer on it. #252527
+    static let bgCard = color(srgb(0x252527))
     /// Controls on a card, a step above `surface`. #3A3A3C
     static let inputSurface = color(srgb(0x3A3A3C))
     /// The 1 pt edge of cards and panels.
@@ -230,7 +238,7 @@ struct RaisedButtonStyle: ButtonStyle {
 }
 
 /// A small text button of a card row: a capsule of the input color, lighter on hover, darker while pressed.
-/// `formRow`: as tall as a compact `CapsuleTabs`, for a form row. `prominent`: the accent color with white text.
+/// `formRow`: as tall as a compact `CapsuleTabs`, for a form row. `prominent`: `Palette.primaryFill` with white text.
 struct RowTextButtonStyle: ButtonStyle {
     var formRow = false
     var prominent = false
@@ -255,7 +263,7 @@ struct RowTextButtonStyle: ButtonStyle {
                 .frame(height: formRow ? 24 : nil)
                 .background(
                     Capsule()
-                        .fill(prominent ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Palette.inputSurface))
+                        .fill(prominent ? AnyShapeStyle(Palette.primaryFill) : AnyShapeStyle(Palette.inputSurface))
                         .overlay(Capsule().fill(
                             configuration.isPressed ? Palette.pressedOverlay : hovered && isEnabled ? Palette.hoverFill : .clear)))
                 .contentShape(Capsule())
@@ -357,7 +365,7 @@ struct SidebarItemStyle: ButtonStyle {
 }
 
 /// A button of a bottom bar: `height` tall (a circle for an icon, with no `horizontalPadding`), a capsule of the input
-/// color, or the accent color when `prominent`; lighter on hover, darker while pressed, dimmed when disabled.
+/// color, or `Palette.primaryFill` when `prominent`; lighter on hover, darker while pressed, dimmed when disabled.
 struct BottomBarButtonStyle: ButtonStyle {
     /// Every control of the bottom bars: buttons, menus, chips and a one-line text field.
     static let height: CGFloat = 34
@@ -390,7 +398,7 @@ struct BottomBarButtonStyle: ButtonStyle {
                 .frame(minWidth: height, minHeight: height, maxHeight: height)
                 .background(
                     Capsule()
-                        .fill(prominent ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Palette.inputSurface))
+                        .fill(prominent ? AnyShapeStyle(Palette.primaryFill) : AnyShapeStyle(Palette.inputSurface))
                         .overlay(Capsule().fill(
                             configuration.isPressed && !menu ? Palette.pressedOverlay
                                 : (hovered || configuration.isPressed) && isEnabled ? Palette.hoverFill : .clear)))

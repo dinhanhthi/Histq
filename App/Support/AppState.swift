@@ -119,7 +119,7 @@ enum PrefKey: String, CaseIterable {
     /// The value a key has until the user sets it.
     var defaultValue: Any {
         switch self {
-        case .dateFormat: "MM/dd/yyyy @ h:mm a"
+        case .dateFormat: "MM/dd/yy @ HH:mm"
         case .rowDensity: "regular"
         case .avatarMode: "generated"
         case .pullMode: "fastForward"

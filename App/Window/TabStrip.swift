@@ -1,4 +1,5 @@
-// The tab strip under the toolbar (Rex style): the window's tabs as standalone pills, then New tab and the tab list.
+// The tab strip under the toolbar (Rex style): the window's tabs as standalone pills, then New tab and the tab list,
+// all inside the tab row's `PanelContainer` (MainView).
 import AppKit
 import SwiftUI
 
@@ -12,8 +13,10 @@ private enum TabStripMetrics {
     static let rowInset: CGFloat = 1
     static let minTabWidth: CGFloat = 96
     static let maxTabWidth: CGFloat = 200
-    /// The close button's square, and the matching slot before the title (the profile color dot, Phase 7).
+    /// The close button's square, and the matching slot before the title (the profile color dot).
     static let slot: CGFloat = 16
+    /// The profile color dot in that slot.
+    static let dot: CGFloat = 8
     /// How far a press moves before it reorders the tab.
     static let dragThreshold: CGFloat = 5
 }
@@ -27,7 +30,8 @@ struct TabStrip: View {
     var body: some View {
         HStack(spacing: 12) {
             TabTrack(model: model)
-            HStack(spacing: 14) {
+            // Secondary filled circles, as tall as the tabs, so they read as buttons inside the tab row's container.
+            HStack(spacing: TabStripMetrics.gap) {
                 Button { model.openTab(nil) } label: {
                     Label("New Tab", systemImage: "plus")
                 }
@@ -41,12 +45,10 @@ struct TabStrip: View {
                 }
             }
             .labelStyle(.iconOnly)
-            .foregroundStyle(.secondary)
-            .buttonStyle(RowIconButtonStyle())
-            .padding(.horizontal, 5)
+            .buttonStyle(BottomBarButtonStyle(height: TabStripMetrics.tabHeight, horizontalPadding: 0))
+            .padding(TabStripMetrics.rowInset)
             .background(WindowDragBlocker())
         }
-        .padding(.trailing, 12)
     }
 }
 
@@ -98,8 +100,10 @@ private struct TabTrack: View {
             ForEach(Array(model.tabs.enumerated()), id: \.element.id) { index, tab in
                 let selected = tab.id == model.selectedTabID
                 let dragged = tab.id == draggedID
-                TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, selected: selected,
-                        dragged: dragged, namespace: namespace,
+                // A repo tab's profile; a tab not opened yet (filled in the background) has no session, so no dot.
+                let profile = model.sessions[tab.id]?.profile
+                TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color,
+                        profileName: profile?.name, selected: selected, dragged: dragged, namespace: namespace,
                         onSelect: { model.selectTab(id: tab.id) },
                         onClose: { close(tab.id) })
                     .frame(width: tabWidth, height: TabStripMetrics.tabHeight)
@@ -170,10 +174,14 @@ private struct TabTrack: View {
     }
 }
 
-/// One tab, a standalone pill: its name, centered and cut with "…", and a close button while hovered.
+/// One tab, a standalone pill: its profile's color dot, its name, centered and cut with "…", and a close button while
+/// hovered.
 private struct TabItem: View {
     let title: String
     let help: String
+    /// The profile's `#RRGGBB`; nil without a profile (no dot).
+    let profileColor: String?
+    let profileName: String?
     let selected: Bool
     let dragged: Bool
     let namespace: Namespace.ID
@@ -183,8 +191,16 @@ private struct TabItem: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            // Phase 7: the tab's profile color dot goes in this slot.
-            Color.clear.frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+            Group {
+                if let profileColor {
+                    Circle()
+                        .fill(ProfileColors.color(profileColor))
+                        .frame(width: TabStripMetrics.dot, height: TabStripMetrics.dot)
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
             Text(title)
                 .font(.callout)
                 .lineLimit(1)
@@ -225,6 +241,7 @@ private struct TabItem: View {
         .help(help)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
+        .accessibilityValue(profileName.map { "Profile \($0)" } ?? "")
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityAction(.default, onSelect)
     }

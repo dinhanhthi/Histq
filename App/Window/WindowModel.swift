@@ -11,10 +11,9 @@ import os
 final class WindowModel {
     struct Tab: Identifiable, Equatable {
         let id = UUID()
-        /// The repo's folder; nil for a Welcome tab.
+        /// The repo's folder; nil for a Welcome tab. Its profile lives in its `RepoSession` (`profileID`), which runs
+        /// the git commands that use it.
         var repoURL: URL?
-        /// The profile the tab's git commands use; Phase 7 fills it.
-        var profileID: UUID?
 
         /// The repo folder's name, or "New Tab" for a Welcome tab.
         var title: String { repoURL?.lastPathComponent ?? "New Tab" }
@@ -29,6 +28,11 @@ final class WindowModel {
     @ObservationIgnored private var welcomes: [Tab.ID: WelcomeModel] = [:]
     /// The page the window shows: the selected tab (`.home`), Settings or About.
     let navigation = Navigation()
+    /// The Settings page's section, kept while other pages show.
+    private(set) var settingsSection: SettingsSection = .general
+    /// Changes with every `selectSettings`, even of the same section: the section's placeholder and content lines
+    /// follow it.
+    private(set) var settingsToken = 0
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
 
@@ -152,6 +156,15 @@ final class WindowModel {
         navigation.page = navigation.page == .settings ? .home : .settings
     }
 
+    /// Shows Settings at `section`: the path a click on a Settings sidebar row takes. The section switches in this
+    /// call; a section whose data is still loading shows its placeholder in the same frame.
+    func selectSettings(_ section: SettingsSection) {
+        UITiming.select("settings \(section.rawValue)")
+        navigation.page = .settings
+        settingsSection = section
+        settingsToken &+= 1
+    }
+
     /// Routes a DEBUG `-HistqSelect` request through the same paths a click takes.
     func select(_ request: SelectRequest) {
         switch request.kind {
@@ -162,8 +175,16 @@ final class WindowModel {
             }
             selectTab(at: index)
         case .settings:
-            UITiming.select("settings \(request.value ?? "")")
-            navigation.page = .settings
+            guard let value = request.value else {
+                navigation.page = .settings
+                return
+            }
+            guard let section = SettingsSection(rawValue: value) else {
+                Self.logger.error("-HistqSelect settings: unknown section \(value, privacy: .public)")
+                navigation.page = .settings
+                return
+            }
+            selectSettings(section)
         case .sidebar:
             guard let session = selectedSession, let tab = request.value.flatMap(SidebarTab.init(selectValue:)) else {
                 Self.logger.error("-HistqSelect sidebar: no repo tab or unknown tab \(request.value ?? "", privacy: .public)")

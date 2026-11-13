@@ -67,10 +67,20 @@ private enum SidebarMetrics {
     static let cardPadding: CGFloat = 6
     /// Between two rows' capsules: tighter than Settings', the lists are long.
     static let rowSpacing: CGFloat = 2
+    /// A row's icon from its capsule's leading edge. The card header's icon starts after its padding (10), the chevron
+    /// (12) and a gap (6), 28 pt into the card; a row starts at the card padding (6) plus this, so the rows' icons
+    /// line up with the section's own icon.
+    static let rowLeading: CGFloat = 28 - cardPadding
+    /// The extra indent of a remote's branches under the remote's row: one step, as GitKraken nests them.
+    static let nestedIndent: CGFloat = 16
+    /// The section and row icons (GitKraken's): Local is this Mac, Remote the cloud, each branch a branch.
+    static let localImage = "laptopcomputer"
+    static let remoteImage = "cloud"
+    static let branchImage = "arrow.triangle.branch"
 }
 
 /// The sidebar of a repo tab: the tab picker across its width (icon and short name; the full name is the tooltip),
-/// then its sections as cards on the window glass, in a scroll view. The cards wait for the refs (capsule skeleton
+/// then its sections as cards in the panel's container, in a scroll view. The cards wait for the refs (capsule skeleton
 /// rows in the same cards until then); the tab capsules and the cards' chevrons work at once.
 struct SidebarView: View {
     @Bindable var session: RepoSession
@@ -89,7 +99,8 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: SidebarMetrics.cardSpacing) {
                     sections
                 }
-                .padding(.vertical, SidebarMetrics.cardSpacing)
+                // The panel's container pads the bottom.
+                .padding(.top, SidebarMetrics.cardSpacing)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
@@ -104,19 +115,22 @@ struct SidebarView: View {
             BranchSections(session: session, refs: refs)
                 .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.tags, .loaded(let refs)):
-            SidebarSection(title: "Tags", count: refs.tags.count, isExpanded: $session.tagsExpanded) {
+            SidebarSection(title: "Tags", systemImage: "tag", count: refs.tags.count,
+                           isExpanded: $session.tagsExpanded) {
                 TagRows(session: session, tags: refs.tags)
             }
             .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
         case (.branches, .idle), (.branches, .loading):
-            SidebarSection(title: "Local", count: nil, isExpanded: $session.localExpanded) {
+            SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: nil,
+                           isExpanded: $session.localExpanded) {
                 SkeletonRows(fractions: [0.45, 0.6, 0.35, 0.7, 0.5])
             }
-            SidebarSection(title: "Remote", count: nil, isExpanded: $session.remoteExpanded) {
+            SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: nil,
+                           isExpanded: $session.remoteExpanded) {
                 SkeletonRows(fractions: [0.3, 0.55, 0.4])
             }
         case (.tags, .idle), (.tags, .loading):
-            SidebarSection(title: "Tags", count: nil, isExpanded: $session.tagsExpanded) {
+            SidebarSection(title: "Tags", systemImage: "tag", count: nil, isExpanded: $session.tagsExpanded) {
                 SkeletonRows(fractions: [0.3, 0.45, 0.35, 0.5])
             }
         case (_, .failed(let message)):
@@ -136,30 +150,29 @@ private struct BranchSections: View {
     let refs: Refs
 
     var body: some View {
-        SidebarSection(title: "Local", count: refs.localBranches.count, isExpanded: $session.localExpanded) {
+        SidebarSection(title: "Local", systemImage: SidebarMetrics.localImage, count: refs.localBranches.count,
+                       isExpanded: $session.localExpanded) {
             if refs.localBranches.isEmpty { EmptyRow(text: "No local branches") }
             ForEach(refs.localBranches, id: \.refName) { branch in
+                // As in GitKraken, the checked-out branch shows a check in place of the branch icon.
                 BranchRow(session: session, item: .local(branch.name), name: branch.name,
-                          systemImage: branch.isHead ? "checkmark" : "laptopcomputer") {
+                          systemImage: branch.isHead ? "checkmark" : SidebarMetrics.branchImage) {
                     AheadBehind(branch: branch)
                 }
             }
         }
-        SidebarSection(title: "Remote", count: refs.remoteBranches.count, isExpanded: $session.remoteExpanded) {
+        SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: refs.remoteBranches.count,
+                       isExpanded: $session.remoteExpanded) {
             if remotes.isEmpty { EmptyRow(text: "No remotes") }
             ForEach(remotes, id: \.name) { remote in
-                Text(remote.name)
-                    .font(.settingsCaption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.top, 4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+                RemoteRow(name: remote.name)
                     .contextMenu { MenuEntriesView(entries: RepoMenus.remote(named: remote.name, session)) }
                 ForEach(remote.branches, id: \.refName) { branch in
                     BranchRow(session: session, item: .remote(branch.name),
                               name: String(branch.name.dropFirst(remote.name.count + 1)),
-                              systemImage: "cloud") { EmptyView() }
+                              systemImage: SidebarMetrics.branchImage, indent: SidebarMetrics.nestedIndent) {
+                        EmptyView()
+                    }
                 }
             }
         } accessory: {
@@ -208,14 +221,15 @@ private struct TagRows: View {
 /// refs load. `accessory` sits at the header's end (the Remote card's menu).
 private struct SidebarSection<Content: View, Accessory: View>: View {
     let title: String
+    let systemImage: String
     let count: Int?
     @Binding var isExpanded: Bool
     @ViewBuilder let content: () -> Content
     @ViewBuilder let accessory: () -> Accessory
 
     var body: some View {
-        SectionCard(title, count: count, countIsLoading: count == nil, isExpanded: $isExpanded,
-                    contentPadding: SidebarMetrics.cardPadding) {
+        SectionCard(title, systemImage: systemImage, count: count, countIsLoading: count == nil,
+                    isExpanded: $isExpanded, contentPadding: SidebarMetrics.cardPadding) {
             VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
                 content()
             }
@@ -226,8 +240,10 @@ private struct SidebarSection<Content: View, Accessory: View>: View {
 }
 
 extension SidebarSection where Accessory == EmptyView {
-    init(title: String, count: Int?, isExpanded: Binding<Bool>, @ViewBuilder content: @escaping () -> Content) {
-        self.init(title: title, count: count, isExpanded: isExpanded, content: content, accessory: { EmptyView() })
+    init(title: String, systemImage: String, count: Int?, isExpanded: Binding<Bool>,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.init(title: title, systemImage: systemImage, count: count, isExpanded: isExpanded, content: content,
+                  accessory: { EmptyView() })
     }
 }
 
@@ -238,8 +254,35 @@ private struct EmptyRow: View {
     var body: some View {
         Text(text)
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 10)
+            .padding(.leading, SidebarMetrics.rowLeading)
+            .padding(.trailing, 10)
             .frame(height: SidebarItemStyle.height)
+    }
+}
+
+/// A remote's row in the Remote card ("origin"): a server icon and its name, its branches indented under it. Its
+/// context menu renames, removes or re-points the remote.
+private struct RemoteRow: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "server.rack")
+                .frame(width: 20, alignment: .leading)
+            Text(name)
+                .font(.body.weight(.medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.leading, SidebarMetrics.rowLeading)
+        .padding(.trailing, 10)
+        .frame(minHeight: SidebarItemStyle.height)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .help(name)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Remote \(name)")
     }
 }
 
@@ -251,14 +294,17 @@ private struct BranchRow<Trailing: View>: View {
     let item: SidebarItem
     let name: String
     let systemImage: String
+    /// Past `SidebarMetrics.rowLeading`: a remote's branches sit one step in from the remote's row.
+    var indent: CGFloat = 0
     @ViewBuilder let trailing: () -> Trailing
     @State private var hovered = false
 
     var body: some View {
         let selected = session.sidebarSelection == item
         HStack(spacing: 8) {
+            // Leading-aligned in its slot, so every glyph starts where the section header's icon does.
             Image(systemName: systemImage)
-                .frame(width: 20)
+                .frame(width: 20, alignment: .leading)
             HStack(spacing: 4) {
                 Text(name)
                     .lineLimit(1)
@@ -269,7 +315,8 @@ private struct BranchRow<Trailing: View>: View {
         }
         .foregroundStyle(selected ? Color.primary : Color.secondary)
         // The look of `SidebarItemStyle`: a neutral capsule when selected, a hover capsule otherwise.
-        .padding(.horizontal, 10)
+        .padding(.leading, SidebarMetrics.rowLeading + indent)
+        .padding(.trailing, 10)
         .frame(minHeight: SidebarItemStyle.height)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Capsule().fill(selected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
@@ -344,10 +391,11 @@ private struct SkeletonRows: View {
         ForEach(fractions.indices, id: \.self) { index in
             HStack(spacing: 8) {
                 SkeletonLine(width: 14, height: 14)
-                    .frame(width: 20)
+                    .frame(width: 20, alignment: .leading)
                 SkeletonLine(fraction: fractions[index], height: 11)
             }
-            .padding(.horizontal, 10)
+            .padding(.leading, SidebarMetrics.rowLeading)
+            .padding(.trailing, 10)
             .frame(height: SidebarItemStyle.height)
         }
         .allowsHitTesting(false)

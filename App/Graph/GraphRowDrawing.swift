@@ -11,15 +11,17 @@ struct GraphMetrics: Equatable {
 
     /// "compact", "regular" (the default) or "comfortable"; anything else reads as regular.
     init(density: String) {
+        // Closer to GitKraken's spacing (user, 2026-11-13): regular 28 -> 32, the others scaled with it.
         switch density {
-        case "compact": rowHeight = 22
-        case "comfortable": rowHeight = 34
-        default: rowHeight = 28
+        case "compact": rowHeight = 26
+        case "comfortable": rowHeight = 38
+        default: rowHeight = 32
         }
     }
 
-    /// A commit's node (its avatar's circle).
-    var nodeDiameter: CGFloat { (rowHeight * 0.65).rounded() }
+    /// A commit's node (its avatar's circle): the same size as before the rows grew (18 pt at regular), so the lane
+    /// pitch, the graph column's default width and any saved widths still fit the lanes.
+    var nodeDiameter: CGFloat { (rowHeight * 0.56).rounded() }
     /// From one lane's center to the next: a node and a small gap.
     var laneWidth: CGFloat { nodeDiameter + 4 }
     /// Before lane 0.

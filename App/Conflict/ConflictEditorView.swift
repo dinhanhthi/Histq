@@ -1,8 +1,8 @@
 // A conflicted file in panel2, in place of the graph (GitKraken's layout), each part in its own card: the header (the
-// file, its conflict count, the encoding, "Open in external merge tool", Save, close), then panes A and B side by side
-// (the two sides' whole files, conflict lines tinted with checkboxes) above Output (the merge, editable, with
-// "conflict k of N"). A binary file or a file deleted on one side gets a chooser card instead. The stages load off the
-// main actor; until then the cards are skeletons.
+// file, its conflict count, the encoding, "Open in external merge tool", Save, close), then panes A and B side by
+// side in one card (the two sides' whole files, conflict lines tinted with checkboxes) above Output (the merge,
+// editable, with "conflict k of N"). A binary file or a file deleted on one side gets a chooser card instead. The
+// stages load off the main actor; until then the cards are skeletons.
 import HistqCore
 import SwiftUI
 
@@ -184,7 +184,7 @@ private struct ConflictHeaderCard: View {
     }
 }
 
-/// The loaded editor: A | B over Output for a text conflict, else the chooser card.
+/// The loaded editor: one card with A | B over Output for a text conflict, else the chooser card.
 private struct ConflictContent: View {
     let session: RepoSession
     let document: ConflictDocument
@@ -194,9 +194,13 @@ private struct ConflictContent: View {
         if let merge = document.merge {
             let _ = sync.merge = merge
             VStack(spacing: SectionCardMetrics.spacing) {
-                HStack(spacing: SectionCardMetrics.spacing) {
-                    paneCard(.a, merge: merge)
-                    paneCard(.b, merge: merge)
+                // A and B in one card, side by side, split by a 1 pt line (a `Divider` in an HStack is vertical).
+                SectionCard(nil, contentPadding: 0) {
+                    HStack(spacing: 0) {
+                        pane(.a, merge: merge)
+                        Divider()
+                        pane(.b, merge: merge)
+                    }
                 }
                 .frame(maxHeight: .infinity)
                 ConflictOutputCard(session: session, document: document, merge: merge, sync: sync)
@@ -208,45 +212,43 @@ private struct ConflictContent: View {
                 sync.jump(toConflict: document.current)
             }
         } else {
-            VStack(spacing: SectionCardMetrics.spacing) {
-                ConflictChooserCard(session: session, document: document)
-                Spacer(minLength: 0)
-            }
+            ConflictChooserCard(session: session, document: document)
         }
     }
 
-    private func paneCard(_ side: ThreeWayMerge.Side, merge: ThreeWayMerge) -> some View {
+    /// One side's header (its tick-all checkbox, badge and title) over its lines.
+    private func pane(_ side: ThreeWayMerge.Side, merge: ThreeWayMerge) -> some View {
         let isA = side == .a
         let lines = isA ? merge.conflictRegions.flatMap { Array(merge.regions[$0].a) }
             : merge.conflictRegions.flatMap { Array(merge.regions[$0].b) }
         let allTicked = !lines.isEmpty && lines.allSatisfy { merge.isTicked(side, line: $0) }
-        return SectionCard(nil, contentPadding: 0) {
-            VStack(spacing: 0) {
-                HStack(spacing: 8) {
-                    Toggle(isOn: Binding(
-                        get: { allTicked },
-                        set: { [session] ticked in session.setConflictTickedAll(ticked, side: side) })
-                    ) { EmptyView() }
-                        .toggleStyle(.checkbox)
-                        .labelsHidden()
-                        .disabled(lines.isEmpty || session.conflictBusy != nil)
-                        .help(isA ? "Take every conflict line of A" : "Take every conflict line of B")
-                    SideBadge(side: side)
-                    PaneTitle(commit: isA ? document.aCommit : document.bCommit,
-                              label: isA ? document.source.labels.a : document.source.labels.b, side: side)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 10)
-                .frame(height: 34)
-                Divider()
-                ConflictLinePane(
-                    side: side, lines: isA ? document.aLines : document.bLines, merge: merge,
-                    revision: document.revision, loadID: document.loadID, sync: sync,
-                    onTickLines: { [session] ticked, lines in session.setConflictTicked(ticked, side: side, lines: lines) },
-                    onTickConflict: { [session] ticked, k in session.setConflictTicked(ticked, side: side, conflict: k) })
-                    .frame(maxHeight: .infinity)
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Toggle(isOn: Binding(
+                    get: { allTicked },
+                    set: { [session] ticked in session.setConflictTickedAll(ticked, side: side) })
+                ) { EmptyView() }
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .disabled(lines.isEmpty || session.conflictBusy != nil)
+                    .help(isA ? "Take every conflict line of A" : "Take every conflict line of B")
+                SideBadge(side: side)
+                PaneTitle(commit: isA ? document.aCommit : document.bCommit,
+                          label: isA ? document.source.labels.a : document.source.labels.b, side: side)
+                Spacer(minLength: 0)
             }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            Divider()
+            ConflictLinePane(
+                side: side, lines: isA ? document.aLines : document.bLines, merge: merge,
+                revision: document.revision, loadID: document.loadID, sync: sync,
+                onTickLines: { [session] ticked, lines in session.setConflictTicked(ticked, side: side, lines: lines) },
+                onTickConflict: { [session] ticked, k in session.setConflictTicked(ticked, side: side, conflict: k) })
+                .frame(maxHeight: .infinity)
         }
+        // Both panes get half the card, whatever their titles' widths.
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -382,6 +384,8 @@ private struct ConflictChooserCard: View {
                         }
                     }
                 }
+                // Fills panel2 like the panes it stands in for.
+                .frame(maxHeight: .infinity, alignment: .topLeading)
             }
         case .binary(_, let a, let b):
             SectionCard("Binary file", systemImage: "doc.zipper") {
@@ -397,6 +401,7 @@ private struct ConflictChooserCard: View {
                     }
                     .disabled(isBusy)
                 }
+                .frame(maxHeight: .infinity, alignment: .topLeading)
             }
         case .text:
             EmptyView()
@@ -413,13 +418,17 @@ private struct ConflictChooserCard: View {
     }
 }
 
-/// The editor's skeleton: panes A and B (a header with a checkbox and a title, then numbered lines) over Output.
+/// The editor's skeleton: panes A and B in one card (a header with a checkbox and a title, then numbered lines) over
+/// Output.
 private struct ConflictPlaceholder: View {
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
-            HStack(spacing: SectionCardMetrics.spacing) {
-                paneSkeleton(titleWidth: 140)
-                paneSkeleton(titleWidth: 150)
+            SectionCard(nil, contentPadding: 0) {
+                HStack(spacing: 0) {
+                    paneSkeleton(titleWidth: 140)
+                    Divider()
+                    paneSkeleton(titleWidth: 150)
+                }
             }
             .frame(maxHeight: .infinity)
             SectionCard(nil, contentPadding: 0) {
@@ -440,20 +449,18 @@ private struct ConflictPlaceholder: View {
     }
 
     private func paneSkeleton(titleWidth: CGFloat) -> some View {
-        SectionCard(nil, contentPadding: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 8) {
-                    SkeletonLine(width: 14, height: 14)
-                    SkeletonLine(width: 20, height: 20)
-                    SkeletonLine(width: titleWidth, height: 11)
-                }
-                .padding(.horizontal, 10)
-                .frame(height: 34)
-                Divider()
-                lines([0.55, 0.6, 0.5, 0.62, 0.58, 0.52, 0.6, 0.48])
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                SkeletonLine(width: 14, height: 14)
+                SkeletonLine(width: 20, height: 20)
+                SkeletonLine(width: titleWidth, height: 11)
             }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            Divider()
+            lines([0.55, 0.6, 0.5, 0.62, 0.58, 0.52, 0.6, 0.48])
         }
-        .frame(maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private func lines(_ widths: [CGFloat]) -> some View {

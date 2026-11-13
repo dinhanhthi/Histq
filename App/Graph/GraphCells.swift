@@ -67,8 +67,9 @@ final class RefBadgeCellView: NSView {
 
     @MainActor
     private enum Style {
-        static let font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        static let countFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
+        // Normal weight, a size up from the message text (user, 2026-11-13, as GitKraken's labels).
+        static let font = NSFont.systemFont(ofSize: 13)
+        static let countFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         static let paragraph: NSParagraphStyle = {
             let style = NSMutableParagraphStyle()
             style.lineBreakMode = .byTruncatingTail
@@ -81,11 +82,13 @@ final class RefBadgeCellView: NSView {
             .font: countFont, .foregroundColor: Palette.graphBadgeText,
         ]
         static let leading: CGFloat = 6
-        static let padding: CGFloat = 6
+        static let padding: CGFloat = 7
         static let gap: CGFloat = 4
         static let iconGap: CGFloat = 3
-        static let icon: CGFloat = 11
-        static let radius: CGFloat = 4
+        static let icon: CGFloat = 12
+        static let radius: CGFloat = 5
+        /// A badge's height, less in a row too short for it (compact).
+        static let height: CGFloat = 22
         /// Room kept for the line to the node.
         static let trailing: CGFloat = 8
     }
@@ -93,7 +96,7 @@ final class RefBadgeCellView: NSView {
     /// SF Symbols in the badge text color.
     @MainActor private static func symbol(_ name: String) -> NSImage? {
         if let cached = symbols[name] { return cached }
-        let configuration = NSImage.SymbolConfiguration(pointSize: 9.5, weight: .semibold)
+        let configuration = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .regular)
             .applying(NSImage.SymbolConfiguration(paletteColors: [Palette.graphBadgeText]))
         let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(configuration)
@@ -163,7 +166,7 @@ final class RefBadgeCellView: NSView {
     private func layout() -> Layout? {
         guard !badges.isEmpty else { return nil }
         var layout = Layout()
-        let height = min(20, bounds.height - 2 * metrics.bandInset)
+        let height = min(Style.height, bounds.height - 2 * metrics.bandInset)
         let y = (bounds.height - height) / 2
         let available = bounds.width - Style.leading - Style.trailing
         let sizes = badges.map(Self.widths)
@@ -201,7 +204,7 @@ final class RefBadgeCellView: NSView {
     /// An image of `badge` alone, for its drag.
     func dragImage(of badge: RefBadge, scale: CGFloat) -> NSImage {
         let size = Self.widths(badge)
-        let rect = CGRect(x: 0, y: 0, width: size.chrome + size.name, height: 20)
+        let rect = CGRect(x: 0, y: 0, width: size.chrome + size.name, height: Style.height)
         let image = NSImage(size: rect.size)
         guard let bitmap = NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: Int((rect.width * scale).rounded(.up)),
@@ -238,21 +241,14 @@ final class RefBadgeCellView: NSView {
 
     private func drawBadge(_ badge: RefBadge, in rect: CGRect, context: CGContext) {
         let path = CGPath(roundedRect: rect, cornerWidth: Style.radius, cornerHeight: Style.radius, transform: nil)
-        let lane = Palette.graphLanes[color % Palette.graphLanes.count]
         if case .tag = badge.kind {
             Palette.graphTagFill.setFill()
         } else {
             Palette.graphBadgeFills[color % Palette.graphBadgeFills.count].setFill()
         }
+        // No border, not even on HEAD's branch: its check icon marks it (user, 2026-11-13).
         context.addPath(path)
         context.fillPath()
-        if case .branch(_, _, true) = badge.kind {
-            lane.setStroke()
-            context.setLineWidth(1)
-            context.addPath(CGPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerWidth: Style.radius - 0.5,
-                                   cornerHeight: Style.radius - 0.5, transform: nil))
-            context.strokePath()
-        }
 
         let (leading, trailing) = Self.icons(badge)
         var x = rect.minX + Style.padding

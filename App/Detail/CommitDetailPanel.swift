@@ -84,7 +84,7 @@ struct MultipleSelectionCard: View {
 private struct CommitInfoCard: View {
     let session: RepoSession
     let commit: CommitDetail
-    @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yyyy @ h:mm a"
+    @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
 
     var body: some View {
         SectionCard(commit.isStash ? "Stash" : "Commit",

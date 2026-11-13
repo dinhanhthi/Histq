@@ -26,8 +26,12 @@ final class Navigation {
 /// The rows under the toolbar. The tab strip starts at the top of the safe area, so it sits under the toolbar, and
 /// under the native window tab bar when one shows (Phase 8).
 enum HeaderMetrics {
-    /// The tab strip from the window's leading edge: the cards' inset.
+    /// The tab row's container from the window's edges: the panels' inset.
     static let tabStripInset: CGFloat = RepoLayoutMetrics.inset
+    /// Between the tab row's container and its tab pills.
+    static let tabRowPadding: CGFloat = 4
+    /// Concentric with the tab pills: their radius (28 pt capsules), the strip's 1 pt row inset, then the padding.
+    static let tabRowRadius: CGFloat = 14 + 1 + tabRowPadding
     /// Between the tab strip and the top of every page (the repo panels, Welcome, Settings, About): the 8 pt gap of
     /// the cards.
     static let contentGap: CGFloat = SectionCardMetrics.spacing
@@ -80,15 +84,19 @@ struct MainView: View {
         .modifier(HardTopScrollEdge())
     }
 
-    /// The tab strip, full width under the toolbar, then the menus' running operation. Empty space in the row drags
-    /// the window, like the toolbar's.
+    /// The tab strip, full width under the toolbar, then the menus' running operation, in one `PanelContainer` like
+    /// the panels below. Empty space in the row drags the window, like the toolbar's: the drag area lies over the
+    /// container's fill (padding 0, inset inside), so the whole container drags, not only the gaps around it.
     private var tabRow: some View {
-        HStack(spacing: 0) {
-            TabStrip()
-            TabRowStatus(model: model)
+        PanelContainer(padding: 0, cornerRadius: HeaderMetrics.tabRowRadius) {
+            HStack(spacing: 0) {
+                TabStrip()
+                TabRowStatus(model: model)
+            }
+            .padding(HeaderMetrics.tabRowPadding)
+            .background(WindowDragArea())
         }
-        .padding(.leading, HeaderMetrics.tabStripInset)
-        .background(WindowDragArea())
+        .padding(.horizontal, HeaderMetrics.tabStripInset)
     }
 
     /// Pages slide a little in their order; the leaving page fades out faster, so the two never show through each

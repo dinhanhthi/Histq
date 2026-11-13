@@ -20,6 +20,15 @@ public struct Profile: Codable, Sendable, Equatable, Identifiable {
         case gpg(keyID: String)
         /// A path to an SSH key (private, or public when the agent holds the private key).
         case ssh(keyPath: String)
+
+        /// Whether this signs at all: GPG or SSH with a key that is not blank. A blank key would hand git an empty
+        /// `user.signingKey`, which makes it fall back to whatever key gpg or ssh picks, so it counts as no signing.
+        public var isUsable: Bool {
+            switch self {
+            case .none: false
+            case .gpg(let key), .ssh(let key): !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        }
     }
 
     public enum SSHKey: Codable, Sendable, Equatable {

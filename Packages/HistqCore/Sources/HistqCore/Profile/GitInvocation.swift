@@ -13,6 +13,16 @@
 // promisor remote never fetches through its `uploadpack` or `core.sshCommand`, and UTF-8 log output (a
 // repo's `i18n.logOutputEncoding` such as UTF-16 would put NUL bytes in the NUL-terminated log records).
 // Writes (user actions) keep the normal behavior, so git-lfs and hooks work.
+//
+// A fetch nobody clicked (auto-fetch) gets its own block, because it is network and runs on a timer in a
+// repo that may be downloaded: only the ssh, https and git transports (no `file`, `ext` or remote helper,
+// so a repo's `uploadpack`, `insteadOf` or `vcs` cannot run a local command), no git proxy command, no
+// alternate refs command, no hooks, no fsmonitor, no submodule fetch, no prompt or askpass (an askpass that
+// fails also beats a repo's `core.askPass`), no cookie file written, no gc or maintenance, an ssh that gives
+// up on a dead host, and only the credential helpers of the user's own config (system, global, Xcode's):
+// the list is reset and refilled after the repo's `credential.*helper` entries. A repo that sets its own
+// `http.*` or `remote.<name>.proxy` config is not fetched in the background at all, since those keys could
+// send the user's credentials to a third party.
 import Foundation
 
 public enum GitInvocation {
@@ -22,6 +32,20 @@ public enum GitInvocation {
         /// An automatic read in a folder whose config names `filterDrivers` and `diffDrivers` (see
         /// `filterDrivers(runner:cwd:env:)` and `diffDrivers(runner:cwd:env:)`).
         case read(filterDrivers: [String], diffDrivers: [String] = [])
+        /// A fetch nobody clicked, with the user's own `credentialHelpers` (see
+        /// `credentialHelpers(runner:cwd:env:)`).
+        case backgroundFetch(credentialHelpers: [ConfigEntry])
+    }
+
+    /// One config entry as git lists it: `credential.https://github.com.helper` and its value.
+    public struct ConfigEntry: Sendable, Equatable {
+        public var key: String
+        public var value: String
+
+        public init(key: String, value: String) {
+            self.key = key
+            self.value = value
+        }
     }
 
     /// The base every invocation starts from: `path` as PATH, HOME, and the few inherited variables ssh and gpg
@@ -39,8 +63,8 @@ public enum GitInvocation {
         return env
     }
 
-    /// `base` plus the profile and, for reads, the safety block. Config entries are appended after any
-    /// `GIT_CONFIG_*` entries already in `base`; within command scope the last one wins.
+    /// `base` plus the profile and, for reads and background fetches, their safety block. Config entries are
+    /// appended after any `GIT_CONFIG_*` entries already in `base`; within command scope the last one wins.
     public static func environment(profile: Profile?, base: [String: String], access: Access = .write)
         -> [String: String]
     {
@@ -68,8 +92,84 @@ public enum GitInvocation {
                 config += [("diff.\(driver).textconv", ""), ("diff.\(driver).command", "")]
             }
         }
+        if case .backgroundFetch(let credentialHelpers) = access {
+            env["GIT_ALLOW_PROTOCOL"] = "ssh:https:git"
+            // Set but empty: git then ignores every `core.gitProxy` and connects to a git:// host itself.
+            env["GIT_PROXY_COMMAND"] = ""
+            env["GIT_ASKPASS"] = "/usr/bin/false"
+            env["SSH_ASKPASS"] = "/usr/bin/false"
+            env["GIT_SSH_COMMAND"]? += " -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2"
+            config += backgroundFetchConfig
+            // An empty helper clears the list git built so far (every scope and URL, the repo's included);
+            // the user's own helpers then come back in their order.
+            config.append(("credential.helper", ""))
+            config += credentialHelpers.map { ($0.key, $0.value) }
+        }
         append(config, to: &env)
         return env
+    }
+
+    /// The background fetch environment for a fetch run in `cwd`: lists the user's credential helpers first, and
+    /// throws `BackgroundFetchError.repoSetsNetworkConfig` for a repo with its own http or proxy config.
+    public static func backgroundFetchEnvironment(
+        profile: Profile?, base: [String: String], runner: GitRunner, cwd: URL
+    ) async throws -> [String: String] {
+        let listingEnv = environment(profile: nil, base: base, access: .read(filterDrivers: []))
+        let helpers = try await credentialHelpers(runner: runner, cwd: cwd, env: listingEnv)
+        return environment(profile: profile, base: base, access: .backgroundFetch(credentialHelpers: helpers))
+    }
+
+    /// The `credential.helper` and `credential.<url>.helper` entries (empty resets included, in git's order) of
+    /// every scope git reads in `cwd` but the repo's own (`local`, `worktree`): system, global, command and
+    /// `unknown`, which is where Apple's git keeps Xcode's `osxkeychain` (not listed by `--system`). Listed in
+    /// `cwd`, so a global `includeIf "gitdir:..."` applies as it does for git; an included file has the scope
+    /// of the file that includes it. A valueless entry (which makes git fail anyway) is skipped; a value that is
+    /// not valid UTF-8 and any git failure but "no match" throw, so a fetch never runs with a partial list.
+    ///
+    /// The same listing throws `BackgroundFetchError.repoSetsNetworkConfig` when the repo's own scopes set any
+    /// `http.*` key (`http.<url>.*` too) or a `remote.<name>.proxy`: a repo's proxy, `sslVerify=false`,
+    /// `sslCAInfo` or `extraHeader` could make a fetch nobody clicked hand the user's stored credentials to a
+    /// third party. A fetch the user clicks still runs with them.
+    public static func credentialHelpers(runner: GitRunner, cwd: URL, env: [String: String]) async throws
+        -> [ConfigEntry]
+    {
+        let pattern = "^(credential\\.(.*\\.)?helper|http\\..*|remote\\..*\\.proxy)$"
+        let result = try await runner.run(
+            ["config", "-z", "--show-scope", "--get-regexp", pattern], cwd: cwd, env: env,
+            timeout: .seconds(10), allowedExitCodes: [0, 1])
+        let userScopes: Set<String> = ["system", "global", "command", "unknown"]
+        let credentialPrefix = Array("credential.".utf8)
+        var entries: [ConfigEntry] = []
+        var repoNetworkKeys: [String] = []
+        // `<scope>\0<key>\n<value>\0` per entry; a valueless entry has no `\n<value>`.
+        let fields = result.stdout.split(separator: 0, omittingEmptySubsequences: false)
+        var index = 0
+        while index + 1 < fields.count {
+            let scope = String(decoding: fields[index], as: UTF8.self)
+            let entry = fields[index + 1]
+            index += 2
+            let newline = entry.firstIndex(of: UInt8(ascii: "\n"))
+            let keyBytes = entry[..<(newline ?? entry.endIndex)]
+            let isCredential = keyBytes.starts(with: credentialPrefix)
+            guard userScopes.contains(scope) else {
+                // The repo's own helpers are dropped by the reset; its http and proxy keys stop the fetch.
+                if !isCredential { repoNetworkKeys.append(String(decoding: keyBytes, as: UTF8.self)) }
+                continue
+            }
+            guard isCredential, let newline else { continue }
+            guard let key = String(validating: keyBytes, as: UTF8.self),
+                  let value = String(validating: entry[(newline + 1)...], as: UTF8.self)
+            else { throw ReadSafetyError.credentialHelperNotUTF8 }
+            entries.append(ConfigEntry(key: key, value: value))
+        }
+        if !repoNetworkKeys.isEmpty { throw BackgroundFetchError.repoSetsNetworkConfig(keys: repoNetworkKeys) }
+        return entries
+    }
+
+    public enum BackgroundFetchError: Error, Equatable, Sendable {
+        /// The repo's own config sets these `http.*` or `remote.<name>.proxy` keys, so it is not fetched unless
+        /// the user asks.
+        case repoSetsNetworkConfig(keys: [String])
     }
 
     /// The read environment for a read run in `cwd`: lists the filter and diff drivers configured there first.
@@ -102,6 +202,8 @@ public enum GitInvocation {
         case filterDriverNotUTF8
         /// The config names a diff driver whose name is not valid UTF-8, so it cannot be disabled.
         case diffDriverNotUTF8
+        /// The user's config has a credential helper entry that is not valid UTF-8, so it cannot be passed on.
+        case credentialHelperNotUTF8
     }
 
     /// The subsection names of `section` (`<section>.<name>.<variable>` keys) in every config scope of `cwd`.
@@ -146,16 +248,19 @@ public enum GitInvocation {
                 ("committer.name", name), ("committer.email", email)]
     }
 
+    /// A signing method without a key (`Signing.isUsable` false) signs nothing, as `.none`: never an empty
+    /// `user.signingKey`.
     private static func signingConfig(_ profile: Profile) -> [(String, String)] {
+        guard profile.signing.isUsable else { return [("commit.gpgSign", "false")] }
         switch profile.signing {
         case .none:
-            [("commit.gpgSign", "false")]
+            return [("commit.gpgSign", "false")]
         case .gpg(let keyID):
-            [("gpg.format", "openpgp"), ("user.signingKey", keyID),
-             ("commit.gpgSign", profile.signByDefault ? "true" : "false")]
+            return [("gpg.format", "openpgp"), ("user.signingKey", keyID),
+                    ("commit.gpgSign", profile.signByDefault ? "true" : "false")]
         case .ssh(let keyPath):
-            [("gpg.format", "ssh"), ("user.signingKey", keyPath),
-             ("commit.gpgSign", profile.signByDefault ? "true" : "false")]
+            return [("gpg.format", "ssh"), ("user.signingKey", keyPath),
+                    ("commit.gpgSign", profile.signByDefault ? "true" : "false")]
         }
     }
 
@@ -167,6 +272,19 @@ public enum GitInvocation {
         ("core.hooksPath", "/dev/null"),
         ("diff.external", ""),
         ("i18n.logOutputEncoding", "UTF-8"),
+    ]
+
+    /// `core.alternateRefsCommand` runs while a fetch looks at a repo's alternates (`objects/info/alternates`,
+    /// which a downloaded repo brings along): `true` lists no alternate ref. A submodule fetch would run in a
+    /// nested repo with config of its own, and a background fetch has no use for it.
+    private static let backgroundFetchConfig: [(String, String)] = [
+        ("core.hooksPath", "/dev/null"),
+        ("core.fsmonitor", "false"),
+        ("core.alternateRefsCommand", "true"),
+        ("fetch.recurseSubmodules", "false"),
+        ("http.saveCookies", "false"),
+        ("gc.auto", "0"),
+        ("maintenance.auto", "false"),
     ]
 
     private static func append(_ config: [(String, String)], to env: inout [String: String]) {

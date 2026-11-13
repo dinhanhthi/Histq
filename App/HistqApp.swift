@@ -15,6 +15,8 @@ enum HistqApp {
         GitToolchain.prepare()
         StatePaths.prepare()
         Preferences.registerDefaults()
+        // Read the profiles off the main thread now, so a repo opened later finds its profile in memory.
+        ProfileLibrary.shared.loadIfNeeded()
         let app = NSApplication.shared
         app.delegate = delegate
         app.run()

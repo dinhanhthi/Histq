@@ -36,7 +36,8 @@ enum GraphColumn: String, CaseIterable {
         case .graph: 108
         case .message: 240
         case .author: 76
-        case .date: 152
+        // Fits "12/31/25 @ 23:00", the default format since 7.5.
+        case .date: 120
         }
     }
 

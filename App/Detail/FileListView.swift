@@ -39,14 +39,15 @@ struct FileChange: Hashable, Sendable, Identifiable {
         self.init(kind: kind, path: path, originalPath: originalPath)
     }
 
+    /// The bare glyph, no circle or square behind it (GitKraken's file rows), drawn in `tint`.
     var systemImage: String {
         switch kind {
-        case .added: "plus.square.fill"
-        case .modified, .typeChanged: "pencil.circle.fill"
-        case .deleted: "minus.square.fill"
-        case .renamed, .copied: "arrow.right.square.fill"
-        case .untracked: "questionmark.square.fill"
-        case .conflicted: "exclamationmark.triangle.fill"
+        case .added: "plus"
+        case .modified, .typeChanged: "pencil"
+        case .deleted: "minus"
+        case .renamed, .copied: "arrow.right"
+        case .untracked: "questionmark"
+        case .conflicted: "exclamationmark.triangle"
         }
     }
 
@@ -192,8 +193,11 @@ private struct FileRow<Trailing: View>: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            // A bit bigger and heavier than the text: a bare glyph needs the weight a filled square had.
             Image(systemName: file.systemImage)
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(file.tint)
+                .frame(width: 18)
                 .help(file.kindName)
                 .accessibilityLabel(file.kindName)
             HStack(spacing: 4) {

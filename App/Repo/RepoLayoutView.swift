@@ -1,6 +1,6 @@
-// A repo tab's three panels (Rex style: solid cards on the window glass with a small gap): the sidebar, the commit
-// graph (or the open file's diff, or a conflicted file's conflict editor) under the operation banner while a merge,
-// rebase, cherry-pick or revert is in progress, and the detail. The two gaps are draggable dividers; the
+// A repo tab's three panels (Rex style: each a `PanelContainer` of solid cards, with a small gap): the sidebar,
+// the commit graph (or the open file's diff, or a conflicted file's conflict editor) under the operation banner while
+// a merge, rebase, cherry-pick or revert is in progress, and the detail. The two gaps are draggable dividers; the
 // side panels' widths are saved in `PrefKey.panelWidths`.
 import HistqCore
 import SwiftUI
@@ -20,7 +20,8 @@ enum RepoLayoutMetrics {
     /// 200 + 360 + 320 + 32 = 912 wide; 520 tall: the header row and about 15 list rows.
     static let minimumWindowSize = CGSize(
         width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome, height: 520)
-    fileprivate static let defaults = PanelWidths(sidebar: 240, detail: 360)
+    /// The sidebar's default includes its container's padding, so its tab picker keeps the titles beside the icons.
+    fileprivate static let defaults = PanelWidths(sidebar: 252, detail: 360)
 }
 
 /// The side panels' widths, stored as "sidebar,detail" in `PrefKey.panelWidths`.
@@ -98,19 +99,26 @@ struct RepoLayoutView: View {
     /// The three panels and their dividers.
     private func panels(widths: PanelWidths, available: CGFloat) -> some View {
         HStack(spacing: 0) {
-            // Its sections are cards of their own on the window glass, not one panel card.
-            SidebarView(session: session)
-                .frame(width: widths.sidebar)
+            // Each panel's cards sit in its own `PanelContainer` (bg_card), a level between the window glass and
+            // the cards.
+            PanelContainer {
+                SidebarView(session: session)
+            }
+            .frame(width: widths.sidebar)
             divider(.sidebar, widths: widths, available: available)
-            VStack(spacing: SectionCardMetrics.spacing) {
-                // Reads the operation itself, so a status read redraws the banner and not the panels.
-                OperationBanner(session: session)
-                panel2
+            PanelContainer {
+                VStack(spacing: SectionCardMetrics.spacing) {
+                    // Reads the operation itself, so a status read redraws the banner and not the panels.
+                    OperationBanner(session: session)
+                    panel2
+                }
             }
             .frame(maxWidth: .infinity)
             divider(.detail, widths: widths, available: available)
-            DetailPanel(session: session)
-                .frame(width: widths.detail)
+            PanelContainer {
+                DetailPanel(session: session)
+            }
+            .frame(width: widths.detail)
         }
     }
 
@@ -175,7 +183,7 @@ struct RepoLayoutView: View {
 /// commits).
 private struct CommitListPanel: View {
     let session: RepoSession
-    @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yyyy @ h:mm a"
+    @AppStorage(PrefKey.dateFormat.rawValue, store: Preferences.defaults) private var dateFormat = "MM/dd/yy @ HH:mm"
     @AppStorage(PrefKey.rowDensity.rawValue, store: Preferences.defaults) private var rowDensity = "regular"
 
     var body: some View {
@@ -241,7 +249,7 @@ private struct SkeletonCommitRows: View {
                     SkeletonLine(width: 96, height: 11)
                 }
                 .padding(.horizontal, 12)
-                .frame(height: 28)
+                .frame(height: 32)
             }
         }
     }
