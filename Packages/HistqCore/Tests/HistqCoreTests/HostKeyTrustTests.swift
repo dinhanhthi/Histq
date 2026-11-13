@@ -55,7 +55,7 @@ struct HostKeyTrustTests {
         let fx = try await Fake()
         defer { fx.remove() }
         for name in ["-oProxyCommand=touch /tmp/pwned", "-p", "example.com evil.com", "exa\tmple.com", "a\nb", "",
-                     "evil.com,example.com"] {
+                     "evil.com,example.com", "*", "h?st", "!evil.com", "[x]", "a|b", "git@example.com"] {
             await #expect(throws: HostKeyTrust.TrustError.invalidHost(name)) {
                 try await fx.trust.scan(HostKeyTrust.Host(name: name))
             }

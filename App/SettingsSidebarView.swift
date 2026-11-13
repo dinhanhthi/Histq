@@ -22,12 +22,12 @@ private enum SettingsSection: CaseIterable, Identifiable {
 }
 
 struct SettingsSidebarView: View {
-    @AppStorage(AppearanceMode.storageKey) private var appearance = AppearanceMode.defaultMode
+    @AppStorage(AppearanceMode.storageKey, store: Preferences.defaults) private var appearance = AppearanceMode.defaultMode
     // Sample settings: replace them with the app's own.
-    @AppStorage("ShowPreviews") private var showPreviews = true
-    @AppStorage("ConfirmDelete") private var confirmDelete = true
-    @AppStorage("DisplayName") private var displayName = ""
-    @AppStorage("VerboseLogging") private var verboseLogging = false
+    @AppStorage("ShowPreviews", store: Preferences.defaults) private var showPreviews = true
+    @AppStorage("ConfirmDelete", store: Preferences.defaults) private var confirmDelete = true
+    @AppStorage("DisplayName", store: Preferences.defaults) private var displayName = ""
+    @AppStorage("VerboseLogging", store: Preferences.defaults) private var verboseLogging = false
     @State private var advancedExpanded = false
     @State private var section = SettingsSection.appearance
     /// Sections opened so far: kept alive like TabView's tabs, so a section keeps its state (and its scroll) when

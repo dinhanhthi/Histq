@@ -30,6 +30,13 @@ enum Palette {
     /// The selected sidebar row's capsule and its 1 pt edge: neutral, no accent.
     static let selectedFill = dynamic(dark: .white.withAlphaComponent(0.14), light: .black.withAlphaComponent(0.07))
     static let selectedBorder = dynamic(dark: .white.withAlphaComponent(0.12), light: .black.withAlphaComponent(0.08))
+    /// The header's tab strip: the track behind the tabs (before macOS 26; Liquid Glass after), the selected tab's
+    /// capsule (with a `selectedBorder` edge), and the hairline between two unselected tabs.
+    static let tabFill = dynamic(dark: .white.withAlphaComponent(0.06), light: .black.withAlphaComponent(0.05))
+    static let selectedTabFill = dynamic(dark: .white.withAlphaComponent(0.14), light: .white)
+    static let tabSeparator = dynamic(dark: .white.withAlphaComponent(0.12), light: .black.withAlphaComponent(0.12))
+    /// The capsule bars of a loading placeholder (`SkeletonLine`), on a `surface` card.
+    static let skeletonFill = dynamic(dark: .white.withAlphaComponent(0.10), light: .black.withAlphaComponent(0.08))
     /// Darkens a pressed button over its own fill.
     static let pressedOverlay = dynamic(dark: .black.withAlphaComponent(0.2), light: .black.withAlphaComponent(0.1))
     /// Dims the window behind an in-window modal (`SettingsModal`), over the page's light backdrop blur.
@@ -398,19 +405,27 @@ struct MenuChevron: View {
 
 /// Tabs for a toolbar item, as tall as its buttons' highlights, in the toolbar's capsule on macOS 26 (a surface capsule
 /// before): the selected tab is an accent capsule that slides between the tabs (no slide under Reduce Motion).
-/// `compact`: smaller, always on a surface capsule, for a form row.
+/// `compact`: smaller, always on a surface capsule, for a form row. `fillsWidth`: the track takes the width it is
+/// offered and the tabs share it equally; with `systemImage`, each tab shows its icon and title, or its icon alone
+/// when the title does not fit (never truncated).
 struct CapsuleTabs<Tab: Hashable>: View {
     @Binding var selection: Tab
     let tabs: [Tab]
     let title: (Tab) -> Text
     var compact = false
+    /// A tab's tooltip (and its accessibility label when it has an icon).
+    var help: ((Tab) -> String)?
+    var fillsWidth = false
+    /// A tab's SF Symbol, drawn before its title.
+    var systemImage: ((Tab) -> String)?
     @Namespace private var namespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(tabs, id: \.self) { tab in
-                Item(tab: tab, title: title(tab), selected: tab == selection, compact: compact, namespace: namespace) {
+                Item(tab: tab, title: title(tab), help: help?(tab), systemImage: systemImage?(tab),
+                     selected: tab == selection, compact: compact, fillsWidth: fillsWidth, namespace: namespace) {
                     withAnimation(animation) { selection = tab }
                 }
             }
@@ -447,8 +462,11 @@ struct CapsuleTabs<Tab: Hashable>: View {
     private struct Item: View {
         let tab: Tab
         let title: Text
+        let help: String?
+        let systemImage: String?
         let selected: Bool
         let compact: Bool
+        let fillsWidth: Bool
         let namespace: Namespace.ID
         let action: () -> Void
         @State private var hovered = false
@@ -457,11 +475,13 @@ struct CapsuleTabs<Tab: Hashable>: View {
 
         var body: some View {
             Button(action: action) {
-                title
-                    .font(compact ? .body : .callout)
+                label
+                    .font(fillsWidth ? .settingsCaption : compact ? .body : .callout)
                     .lineLimit(1)
                     .foregroundStyle(selected ? Palette.onAccent : Color.secondary)
-                    .padding(.horizontal, compact ? 10 : 12)
+                    .padding(.horizontal, fillsWidth ? 4 : compact ? 10 : 12)
+                    // Same flexibility for every tab, so the HStack gives each an equal share.
+                    .frame(minWidth: fillsWidth ? 0 : nil, maxWidth: fillsWidth ? .infinity : nil)
                     .frame(height: height)
                     .background {
                         if hovered && !selected { Capsule().fill(Palette.hoverFill) }
@@ -471,7 +491,27 @@ struct CapsuleTabs<Tab: Hashable>: View {
             }
             .buttonStyle(.plain)
             .onHover { hovered = $0 }
+            // An empty tooltip shows nothing.
+            .help(help.map { Text($0) } ?? Text(verbatim: ""))
+            .accessibilityLabel(systemImage != nil ? help.map { Text($0) } ?? title : title)
             .accessibilityAddTraits(selected ? .isSelected : [])
+        }
+
+        /// The title, or the icon and title (the icon alone when the title does not fit).
+        @ViewBuilder
+        private var label: some View {
+            if let systemImage {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) {
+                        Image(systemName: systemImage)
+                        title
+                    }
+                    .fixedSize()
+                    Image(systemName: systemImage)
+                }
+            } else {
+                title
+            }
         }
     }
 }

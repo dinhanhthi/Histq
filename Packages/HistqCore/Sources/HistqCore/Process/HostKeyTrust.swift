@@ -107,11 +107,12 @@ public struct HostKeyTrust: Sendable {
     }
 
     /// Throws unless `host` is safe to pass to ssh-keyscan and to write into known_hosts.
+    /// Only host-name and IP characters are allowed (`:` for an IPv6 literal), so a written line can never
+    /// carry known_hosts pattern syntax (`*`, `?`, `!`, `[`, `]`, `|`, `@`, `,`, `#`) or whitespace.
     public static func validate(_ host: Host) throws {
         let name = host.name
-        let bad = name.unicodeScalars.contains {
-            CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0)
-                || $0 == "," || $0 == "#"
+        let bad = name.unicodeScalars.contains { scalar in
+            !(scalar.isASCII && (CharacterSet.alphanumerics.contains(scalar) || ".-_:".unicodeScalars.contains(scalar)))
         }
         guard !name.isEmpty, !name.hasPrefix("-"), !bad else { throw TrustError.invalidHost(name) }
         if let port = host.port, !(1...65535).contains(port) { throw TrustError.invalidPort(port) }
