@@ -472,6 +472,29 @@ enum RepoMenus {
         return entries
     }
 
+    /// The toolbar's Pull ▾ menu: fetch all, then each pull mode.
+    static func pull(_ session: RepoSession) -> [MenuEntry] {
+        let enabled = session.currentBranch != nil
+        return [
+            .action("Fetch All") { session.fetchAll() },
+            .separator,
+            .action("Pull (fast-forward if possible)", enabled: enabled) { session.pull(.fastForward) },
+            .action("Pull (fast-forward only)", enabled: enabled) { session.pull(.fastForwardOnly) },
+            .action("Pull (rebase)", enabled: enabled) { session.pull(.rebase) },
+        ]
+    }
+
+    /// The toolbar's Push ▾ menu: push, or force push with lease (confirmed).
+    static func push(_ session: RepoSession) -> [MenuEntry] {
+        guard let branch = session.currentBranch, let target = session.pushTarget(of: branch) else { return [] }
+        return [
+            .action("Push") { session.push(branch: branch, key: .push) },
+            .action("Force Push (with lease)…", enabled: target.lease != nil) {
+                session.push(branch: branch, force: true, key: .push)
+            },
+        ]
+    }
+
     private static func confirmDetached(_ hash: String, label: String, _ session: RepoSession) {
         session.confirm("Check out \(label) as a detached HEAD?",
                         message: "No branch will be checked out; commits made there belong to no branch until you create one.",
@@ -563,7 +586,8 @@ enum RepoMenus {
         return parts[0] == "local" ? .local(parts[1]) : parts[0] == "remote" ? .remote(parts[1]) : nil
     }
 
-    private static func debugLog(_ line: String) {
+    /// Appends a line to `operations.txt` in the state folder (also the palette's `-HistqPaletteRun`).
+    static func debugLog(_ line: String) {
         let url = StatePaths.root.appending(path: "operations.txt", directoryHint: .notDirectory)
         let data = Data((line + "\n").utf8)
         if let handle = try? FileHandle(forWritingTo: url) {

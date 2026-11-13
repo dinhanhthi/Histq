@@ -38,14 +38,12 @@ struct AppearanceSettings: View {
             }
             SettingsGroup("Commit list") {
                 LabeledContent {
-                    Picker("Date format", selection: $dateFormat) {
+                    CapsuleMenuPicker(label: "Date format", selection: $dateFormat,
+                                      title: Text(Self.sample(dateFormat))) {
                         ForEach(formats, id: \.self) { format in
                             Text(Self.sample(format)).tag(format)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .fixedSize()
                 } label: {
                     Text("Date format")
                     SettingsHint("The commit list's Date column.")

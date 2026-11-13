@@ -43,6 +43,8 @@ enum Palette {
     /// reads at 4.68:1 (WCAG AA for body text). Not the accent: #FDBB07 under white text is only 1.71:1, but the
     /// selected pills, the switches and the focus ring keep it. #A86400
     static let primaryFill = color(srgb(0xA86400))
+    /// A primary button's label shadow: lifts the white text off the gold so it stands out more (user, 2026-11-13).
+    static let onPrimaryShadow = Color.black.opacity(0.4)
     static let switchOffFill = color(.white.withAlphaComponent(0.22))
     /// The shadow of the switch's white knob.
     static let knobShadow = Color.black.opacity(0.2)
@@ -238,7 +240,8 @@ struct RaisedButtonStyle: ButtonStyle {
 }
 
 /// A small text button of a card row: a capsule of the input color, lighter on hover, darker while pressed.
-/// `formRow`: as tall as a compact `CapsuleTabs`, for a form row. `prominent`: `Palette.primaryFill` with white text.
+/// `formRow`: as tall as a compact `CapsuleTabs` item, for a form row. `prominent`: `Palette.primaryFill` with white
+/// text (`PrimaryLabelShadow`).
 struct RowTextButtonStyle: ButtonStyle {
     var formRow = false
     var prominent = false
@@ -258,6 +261,7 @@ struct RowTextButtonStyle: ButtonStyle {
             configuration.label
                 .font(formRow ? .body : .callout.weight(.medium))
                 .foregroundStyle(prominent ? AnyShapeStyle(Palette.onAccent) : AnyShapeStyle(.primary))
+                .modifier(PrimaryLabelShadow(isOn: prominent))
                 .padding(.horizontal, formRow ? 12 : 8)
                 .padding(.vertical, formRow ? 0 : 4)
                 .frame(height: formRow ? 24 : nil)
@@ -364,6 +368,16 @@ struct SidebarItemStyle: ButtonStyle {
     }
 }
 
+/// The white label of a primary (`Palette.primaryFill`) button gets a faint dark shadow, so it stands out from the gold.
+/// On the label only, before the fill, so the capsule itself casts nothing.
+private struct PrimaryLabelShadow: ViewModifier {
+    let isOn: Bool
+
+    func body(content: Content) -> some View {
+        content.shadow(color: isOn ? Palette.onPrimaryShadow : .clear, radius: 1, y: 0.75)
+    }
+}
+
 /// A button of a bottom bar: `height` tall (a circle for an icon, with no `horizontalPadding`), a capsule of the input
 /// color, or `Palette.primaryFill` when `prominent`; lighter on hover, darker while pressed, dimmed when disabled.
 struct BottomBarButtonStyle: ButtonStyle {
@@ -394,6 +408,7 @@ struct BottomBarButtonStyle: ButtonStyle {
             configuration.label
                 .font(.body.weight(prominent ? .semibold : .regular))
                 .foregroundStyle(prominent ? AnyShapeStyle(Palette.onAccent) : AnyShapeStyle(.primary))
+                .modifier(PrimaryLabelShadow(isOn: prominent))
                 .padding(.horizontal, horizontalPadding)
                 .frame(minWidth: height, minHeight: height, maxHeight: height)
                 .background(
@@ -477,10 +492,43 @@ struct MenuChevron: View {
     }
 }
 
+/// A dropdown of a form row (the Settings choices longer than a few options): a capsule like
+/// `RowTextButtonStyle(formRow:)` showing `title` (the current choice) and a `MenuChevron`, opening a menu of `content`
+/// with a check on the selected entry. Replaces `Picker(.menu)`, whose AppKit pop-up button is a rounded rectangle on
+/// every macOS, so every button of the app is a capsule (user, 2026-11-13). `content` is the picker's entries, each
+/// `.tag`ged with its value as in a `Picker`.
+struct CapsuleMenuPicker<Value: Hashable, Content: View>: View {
+    let label: String
+    @Binding var selection: Value
+    let title: Text
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        Menu {
+            Picker(label, selection: $selection, content: content)
+                .pickerStyle(.inline)
+                .labelsHidden()
+        } label: {
+            HStack(spacing: 6) {
+                title.lineLimit(1)
+                MenuChevron()
+            }
+        }
+        .menuStyle(.button)
+        .buttonStyle(BottomBarButtonStyle(height: 24, horizontalPadding: 12, menu: true))
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(Text(label))
+        .accessibilityValue(title)
+    }
+}
+
 /// Tabs for a toolbar item, as tall as its buttons' highlights, in the toolbar's capsule on macOS 26 (a surface capsule
 /// before): the selected tab is an accent capsule that slides between the tabs (no slide under Reduce Motion).
-/// `compact`: smaller, always on a surface capsule, for a form row. `fillsWidth`: the track takes the width it is
-/// offered and the tabs share it equally, inset `fillInset` from its edge so the pill floats inside it; with
+/// `compact`: smaller, always on a surface capsule, for a form row or a card header; it has the sidebar's look (the
+/// pill inset `fillInset` from the track's edge, caption text), so every segmented choice in the app matches the
+/// Branches / Tags / PRs tabs (user, 2026-11-13). `fillsWidth`: the track takes the width it is offered and the tabs
+/// share it equally, inset `fillInset` from its edge so the pill floats inside it; with
 /// `systemImage`, each tab shows its icon and title, or its icon alone when the title does not fit (never truncated).
 /// Every shape is a true capsule (`.circular`: radius = half the height), so the pill and the track are concentric.
 struct CapsuleTabs<Tab: Hashable>: View {
@@ -531,7 +579,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
                 content
             } else {
                 content
-                    .padding(fillsWidth ? CapsuleTabs.fillInset : compact ? 2 : 3)
+                    .padding(fillsWidth || compact ? CapsuleTabs.fillInset : 3)
                     .background(Capsule(style: .circular).fill(Palette.surface))
                     .overlay(Capsule(style: .circular).strokeBorder(Palette.surfaceBorder, lineWidth: 1)
                         .allowsHitTesting(false))
@@ -556,7 +604,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
         var body: some View {
             Button(action: action) {
                 label
-                    .font(fillsWidth ? .settingsCaption : compact ? .body : .callout)
+                    .font(fillsWidth || compact ? .settingsCaption : .callout)
                     .lineLimit(1)
                     .foregroundStyle(selected ? Palette.onAccent : Color.secondary)
                     .padding(.horizontal, fillsWidth ? 4 : compact ? 10 : 12)

@@ -14,6 +14,9 @@ final class WindowModel {
         /// The repo's folder; nil for a Welcome tab. Its profile lives in its `RepoSession` (`profileID`), which runs
         /// the git commands that use it.
         var repoURL: URL?
+        /// A restored repo whose folder is gone or no longer a git repository: the tab shows "Repo not found" (Locate,
+        /// Remove) and gets no session.
+        var isMissing = false
 
         /// The repo folder's name, or "New Tab" for a Welcome tab.
         var title: String { repoURL?.lastPathComponent ?? "New Tab" }
@@ -26,6 +29,9 @@ final class WindowModel {
     /// The Welcome tabs' state (the clone in flight, the git check), by tab: it outlives the view across tab
     /// switches. Created on first use by `welcome(for:)`.
     @ObservationIgnored private var welcomes: [Tab.ID: WelcomeModel] = [:]
+    /// Session restore: the saved profile and commit of restored tabs that have no session yet (sessions are made on
+    /// first select), applied when it is made; until then the next save keeps them as they were.
+    @ObservationIgnored private var restored: [Tab.ID: SavedTab] = [:]
     /// The page the window shows: the selected tab (`.home`), Settings or About.
     let navigation = Navigation()
     /// The Settings page's section, kept while other pages show.
@@ -33,6 +39,9 @@ final class WindowModel {
     /// Changes with every `selectSettings`, even of the same section: the section's placeholder and content lines
     /// follow it.
     private(set) var settingsToken = 0
+    /// The open command palette; nil while closed. Read only by `CommandPaletteOverlay`, so opening it redraws the
+    /// overlay alone.
+    private(set) var palette: CommandPaletteModel?
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
 
@@ -63,8 +72,10 @@ final class WindowModel {
         }
         UITiming.open(url.path)
         RecentRepos.shared.add(url)
-        if let existing = tabs.first(where: { $0.repoURL?.path == url.path }) {
-            selectedTabID = existing.id
+        if let existing = tabs.firstIndex(where: { $0.repoURL?.path == url.path }) {
+            // A "Repo not found" tab whose folder is opened again (it is back) opens it.
+            if tabs[existing].isMissing { tabs[existing].isMissing = false }
+            selectedTabID = tabs[existing].id
         } else if let index = selectedIndex, tabs[index].repoURL == nil {
             tabs[index].repoURL = url
         } else {
@@ -111,11 +122,73 @@ final class WindowModel {
     /// Selects the selected repo tab's current selection again (creating its session on first use): its detail goes
     /// to the loading state now and reloads.
     private func activateSelectedTab() {
-        guard let index = selectedIndex, let url = tabs[index].repoURL else { return }
+        guard let index = selectedIndex, let url = tabs[index].repoURL, !tabs[index].isMissing else { return }
         let id = tabs[index].id
-        let session = sessions[id] ?? RepoSession(url: url)
+        let session = sessions[id] ?? makeSession(for: id, url: url)
         sessions[id] = session
         session.select(session.selection)
+    }
+
+    /// A tab's session, with the profile and commit a restored tab had in the saved session.
+    private func makeSession(for id: Tab.ID, url: URL) -> RepoSession {
+        let session = RepoSession(url: url)
+        if let saved = restored.removeValue(forKey: id) {
+            if let profile = saved.profile { session.restoreProfile(profile.profileID) }
+            if let commit = saved.commit { session.restoreSelection(commit) }
+        }
+        return session
+    }
+
+    // MARK: Session restore
+
+    /// Session restore: this new window's tabs become `saved` (`missing` = the folders that are gone) and the saved
+    /// selected tab opens, as a click would show it. Not `openTab`: no recent-repos update, and the other tabs get their
+    /// session only when selected.
+    func restore(_ saved: [SavedTab], selected: Int?, missing: Set<String>) {
+        guard !saved.isEmpty else { return }
+        welcomes.removeAll()
+        tabs = saved.map { tab in
+            Tab(repoURL: tab.path.map { URL(fileURLWithPath: $0, isDirectory: true) },
+                isMissing: tab.path.map(missing.contains) ?? false)
+        }
+        restored = Dictionary(uniqueKeysWithValues: zip(tabs.map(\.id), saved))
+        let index = selected.flatMap { tabs.indices.contains($0) ? $0 : nil } ?? 0
+        selectedTabID = tabs[index].id
+        if let url = tabs[index].repoURL, !tabs[index].isMissing { UITiming.open(url.path) }
+        activateSelectedTab()
+    }
+
+    /// The tabs as the session saves them, in order. A tab with a session saves its live profile and commit; one
+    /// without keeps what it was restored with. Observable: reading it in `withObservationTracking` follows every
+    /// change it depends on (tabs, their sessions' selection and profile).
+    var savedTabs: [SavedTab] {
+        tabs.map { tab in
+            let path = tab.repoURL?.path
+            guard let session = sessions[tab.id] else {
+                var saved = restored[tab.id] ?? SavedTab()
+                saved.path = path
+                return saved
+            }
+            let commit: String? = if case .commit(let hash) = session.selection { hash } else { nil }
+            // Before the repo's profile is resolved, its id says nothing yet: a later launch resolves it again.
+            let profile = session.profileResolved ? SavedProfile(session.profileID) : nil
+            return SavedTab(path: path, profile: profile, commit: commit)
+        }
+    }
+
+    /// "Repo not found" › Locate…: the tab opens `url` instead (the tab that already shows it when there is one).
+    func locate(_ id: Tab.ID, at url: URL) {
+        let url = url.standardizedFileURL
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        if let existing = tabs.first(where: { $0.id != id && $0.repoURL?.path == url.path }) {
+            _ = closeTab(id: id)
+            return selectTab(id: existing.id)
+        }
+        UITiming.open(url.path)
+        RecentRepos.shared.add(url)
+        tabs[index].repoURL = url
+        tabs[index].isMissing = false
+        if selectedTabID == id { activateSelectedTab() }
     }
 
     /// Selects a tab by id, through `selectTab(at:)`.
@@ -135,6 +208,7 @@ final class WindowModel {
     func closeTab(id: Tab.ID) -> Bool {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return !tabs.isEmpty }
         tabs.remove(at: index)
+        restored.removeValue(forKey: id)
         sessions.removeValue(forKey: id)?.close()
         welcomes.removeValue(forKey: id)?.cancel()
         if selectedTabID == id {
@@ -163,6 +237,34 @@ final class WindowModel {
         navigation.page = .settings
         settingsSection = section
         settingsToken &+= 1
+    }
+
+    // MARK: Command palette
+
+    /// Opens the command palette on the window's rows now (`PaletteCommands`), `query` typed; the card shows in this
+    /// frame, its rows once ranked off the main actor.
+    func openPalette(query: String = "") {
+        UITiming.select("palette")
+        palette = CommandPaletteModel(snapshot: PaletteCommands.snapshot(for: self), query: query)
+    }
+
+    /// ⌘K: opens the palette, or closes it when it is open.
+    func togglePalette() {
+        if palette == nil { openPalette() } else { closePalette() }
+    }
+
+    func closePalette() {
+        palette = nil
+    }
+
+    /// Runs a row of the current results (Return or a click): the palette closes first, so a confirmation or form the
+    /// action opens takes the focus. False when the row cannot run (disabled or stale); the palette stays open.
+    @discardableResult
+    func performPalette(_ item: PaletteItem) -> Bool {
+        guard let action = palette?.action(for: item) else { return false }
+        palette = nil
+        action()
+        return true
     }
 
     /// Routes a DEBUG `-HistqSelect` request through the same paths a click takes.

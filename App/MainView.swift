@@ -1,5 +1,5 @@
-// The main window: the toolbar in the traffic-light row (`HeaderToolbar`), the tab strip under it, then the selected
-// page, over the window glass.
+// The main window: the toolbar in the traffic-light row (`HeaderToolbar`), the tab strip under it (or the vertical
+// tabs, panel 0, left of the page), then the selected page, over the window glass.
 import AppKit
 import SwiftUI
 
@@ -43,22 +43,35 @@ struct MainView: View {
     /// The page on screen; it follows `navigation.page` with a slide.
     @State private var shownPage = Page.home
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// General › Tab position, applied live.
+    @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
 
     var body: some View {
+        let tabsOnLeft = TabPosition.resolved(tabPosition) == .left
         VStack(spacing: 0) {
-            tabRow
-            // Rendered from `shownPage`, so the leaving page keeps its content while it slides out.
-            ZStack {
-                switch shownPage {
-                case .home: TabContent().transition(pageTransition)
-                // The scaffold keeps one settings layout; both define `SettingsRoot`.
-                case .settings: SettingsRoot().transition(pageTransition)
-                case .about: AboutPage().transition(pageTransition)
+            if !tabsOnLeft { tabRow }
+            // The pages keep one place in the tree in both positions, so switching the position (from the Settings
+            // page itself) never rebuilds the page on screen.
+            HStack(spacing: 0) {
+                if tabsOnLeft {
+                    // The pages' own leading inset is the gap after it.
+                    VerticalTabsPanel()
+                        .padding([.leading, .bottom], HeaderMetrics.tabStripInset)
                 }
+                // Rendered from `shownPage`, so the leaving page keeps its content while it slides out.
+                ZStack {
+                    switch shownPage {
+                    case .home: TabContent().transition(pageTransition)
+                    // The scaffold keeps one settings layout; both define `SettingsRoot`.
+                    case .settings: SettingsRoot().transition(pageTransition)
+                    case .about: AboutPage().transition(pageTransition)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
-            .padding(.top, HeaderMetrics.contentGap)
+            // Panel 0 and the page start at the top of the safe area, where the tab row does.
+            .padding(.top, tabsOnLeft ? 0 : HeaderMetrics.contentGap)
         }
         // Whoever switches the page (a tab, the Settings button, a menu), it slides the same way.
         .onChange(of: navigation.page, initial: true) { old, new in
@@ -81,6 +94,8 @@ struct MainView: View {
             }
             .allowsHitTesting(false)
         }
+        // ⌘K / the toolbar's Search: over the tabs and the page, under the toolbar.
+        .overlay { CommandPaletteOverlay(model: model) }
         .modifier(HardTopScrollEdge())
     }
 
@@ -110,7 +125,8 @@ struct MainView: View {
     }
 }
 
-/// The selected tab's area: the three-panel layout of a repo tab, or the Welcome page of a new tab. A new identity
+/// The selected tab's area: the three-panel layout of a repo tab, "Repo not found" for a restored repo that is gone,
+/// or the Welcome page of a new tab. A new identity
 /// per tab: switching tabs shows the new tab's placeholder (or its Welcome state), never the old tab's view.
 private struct TabContent: View {
     @Environment(WindowModel.self) private var model
@@ -118,6 +134,8 @@ private struct TabContent: View {
     var body: some View {
         if let session = model.selectedSession {
             RepoLayoutView(session: session).id(session.id)
+        } else if let index = model.selectedIndex, model.tabs[index].isMissing, let url = model.tabs[index].repoURL {
+            RepoNotFoundView(model: model, tabID: model.tabs[index].id, url: url).id(model.tabs[index].id)
         } else if let id = model.selectedTabID {
             WelcomeView(model: model.welcome(for: id)).id(id)
         }
@@ -165,52 +183,5 @@ private struct AboutPage: View {
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String
         return build.map { "\(short) (\($0))" } ?? short
-    }
-}
-
-// MARK: - Window dragging (Dblore `WindowUtilities.swift`; Phase 8.1 moves these into `App/Window/WindowUtilities.swift`)
-
-/// Behind the tab strip: a mouse-down on its empty space drags the window, like the toolbar's.
-struct WindowDragArea: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { WindowDragView() }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class WindowDragView: NSView {
-        override var mouseDownCanMoveWindow: Bool { true }
-
-        override func mouseDown(with event: NSEvent) {
-            window?.performDrag(with: event)
-        }
-    }
-}
-
-/// Under the tab strip's interactive controls: the window is not movable while the pointer is over them, so a drag
-/// reaches the SwiftUI gesture (a tab's reorder) instead of moving the window. AppKit asks the hosting view, not this
-/// background view, whether a mouse-down moves the window.
-struct WindowDragBlocker: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { WindowDragBlockerView() }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class WindowDragBlockerView: NSView {
-        override func updateTrackingAreas() {
-            super.updateTrackingAreas()
-            trackingAreas.forEach(removeTrackingArea)
-            addTrackingArea(NSTrackingArea(
-                rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
-        }
-
-        override func mouseEntered(with event: NSEvent) { window?.isMovable = false }
-
-        override func mouseExited(with event: NSEvent) { window?.isMovable = true }
-
-        override func viewWillMove(toWindow newWindow: NSWindow?) {
-            // A control removed under the pointer (a closed tab) never gets mouseExited.
-            if newWindow == nil { window?.isMovable = true }
-            super.viewWillMove(toWindow: newWindow)
-        }
-
-        override nonisolated func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }

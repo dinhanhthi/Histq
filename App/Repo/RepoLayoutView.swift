@@ -6,7 +6,7 @@ import HistqCore
 import SwiftUI
 
 /// Sizes of the repo layout. The middle panel takes what the side panels leave. The window's minimum size
-/// (`minimumWindowSize`) fits the three panels at their minimums.
+/// (`minimumWindowSize(tabPosition:)`) fits the three panels at their minimums, and the vertical tabs when they show.
 enum RepoLayoutMetrics {
     /// Between two panels: the divider's grab area.
     static let gap: CGFloat = 8
@@ -17,9 +17,12 @@ enum RepoLayoutMetrics {
     static let graphMin: CGFloat = 360
     /// The panels' row: both insets and both gaps.
     static let chrome: CGFloat = 2 * inset + 2 * gap
-    /// 200 + 360 + 320 + 32 = 912 wide; 520 tall: the header row and about 15 list rows.
-    static let minimumWindowSize = CGSize(
-        width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome, height: 520)
+    /// 200 + 360 + 320 + 32 = 912 wide; with the vertical tabs, their 150 and their own leading inset (the page's
+    /// inset is the gap after them): 1070. 520 tall: the header row and about 15 list rows.
+    static func minimumWindowSize(tabPosition: TabPosition) -> CGSize {
+        let tabs = tabPosition == .left ? VerticalTabsMetrics.width + inset : 0
+        return CGSize(width: sidebar.lowerBound + graphMin + detail.lowerBound + chrome + tabs, height: 520)
+    }
     /// The sidebar's default includes its container's padding, so its tab picker keeps the titles beside the icons.
     fileprivate static let defaults = PanelWidths(sidebar: 252, detail: 360)
 }

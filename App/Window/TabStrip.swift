@@ -1,11 +1,11 @@
-// The tab strip under the toolbar (Rex style): the window's tabs as standalone pills, then New tab and the tab list,
-// all inside the tab row's `PanelContainer` (MainView).
+// The tab strip under the toolbar (Rex style): the window's tabs as standalone pills, then New tab, the command palette
+// and the tab list, all inside the tab row's `PanelContainer` (MainView).
 import AppKit
 import SwiftUI
 
 /// Sizes of the tab strip. The tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the row
-/// scrolls.
-private enum TabStripMetrics {
+/// scrolls. The vertical tabs (`VerticalTabsPanel`) use the same tab height, gap and drag threshold.
+enum TabStripMetrics {
     static let tabHeight: CGFloat = 28
     /// Between two tabs.
     static let gap: CGFloat = 5
@@ -25,30 +25,45 @@ private enum TabStripMetrics {
 /// few points reorders it.
 struct TabStrip: View {
     @Environment(WindowModel.self) private var model
-    @State private var showingTabList = false
 
     var body: some View {
         HStack(spacing: 12) {
             TabTrack(model: model)
-            // Secondary filled circles, as tall as the tabs, so they read as buttons inside the tab row's container.
-            HStack(spacing: TabStripMetrics.gap) {
-                Button { model.openTab(nil) } label: {
-                    Label("New Tab", systemImage: "plus")
-                }
-                .help("New Tab")
-                Button { showingTabList.toggle() } label: {
-                    Label("All Tabs", systemImage: "chevron.down")
-                }
-                .help("All Tabs")
-                .popover(isPresented: $showingTabList, arrowEdge: .bottom) {
-                    TabListPopover(model: model, isPresented: $showingTabList)
-                }
-            }
-            .labelStyle(.iconOnly)
-            .buttonStyle(BottomBarButtonStyle(height: TabStripMetrics.tabHeight, horizontalPadding: 0))
-            .padding(TabStripMetrics.rowInset)
-            .background(WindowDragBlocker())
+            TabStripButtons(model: model, popoverEdge: .bottom)
         }
+    }
+}
+
+/// New Tab, the command palette and the tab list's chevron: secondary filled circles, as tall as the tabs, so they
+/// read as buttons inside the tab row's container. The vertical tabs show the same three at their bottom.
+struct TabStripButtons: View {
+    let model: WindowModel
+    /// Where the tab list's popover opens from the chevron.
+    let popoverEdge: Edge
+    @State private var showingTabList = false
+
+    var body: some View {
+        HStack(spacing: TabStripMetrics.gap) {
+            Button { model.openTab(nil) } label: {
+                Label("New Tab", systemImage: "plus")
+            }
+            .help("New Tab")
+            Button { model.openPalette() } label: {
+                Label("Command Palette", systemImage: "magnifyingglass")
+            }
+            .help("Command Palette (⌘K)")
+            Button { showingTabList.toggle() } label: {
+                Label("All Tabs", systemImage: "chevron.down")
+            }
+            .help("All Tabs")
+            .popover(isPresented: $showingTabList, arrowEdge: popoverEdge) {
+                TabListPopover(model: model, isPresented: $showingTabList)
+            }
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(BottomBarButtonStyle(height: TabStripMetrics.tabHeight, horizontalPadding: 0))
+        .padding(TabStripMetrics.rowInset)
+        .background(WindowDragBlocker())
     }
 }
 
@@ -174,9 +189,9 @@ private struct TabTrack: View {
     }
 }
 
-/// One tab, a standalone pill: its profile's color dot, its name, centered and cut with "…", and a close button while
-/// hovered.
-private struct TabItem: View {
+/// One tab, a standalone pill: its profile's color dot, its name, centered (leading in the vertical tabs) and cut with
+/// "…", and a close button while hovered.
+struct TabItem: View {
     let title: String
     let help: String
     /// The profile's `#RRGGBB`; nil without a profile (no dot).
@@ -187,6 +202,8 @@ private struct TabItem: View {
     let namespace: Namespace.ID
     let onSelect: () -> Void
     let onClose: () -> Void
+    /// The title's place in the space between the dot and the close button.
+    var titleAlignment: Alignment = .center
     @State private var hovered = false
 
     var body: some View {
@@ -206,7 +223,7 @@ private struct TabItem: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .foregroundStyle(selected ? Color.primary : Color.secondary)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, alignment: titleAlignment)
             if hovered && !dragged {
                 Button(action: onClose) {
                     Image(systemName: "xmark")

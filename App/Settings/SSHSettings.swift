@@ -76,14 +76,12 @@ struct SSHSettings: View {
     private func profileGroup(_ store: ProfileStore, current: Profile) -> some View {
         SettingsGroup("Profile") {
             LabeledContent {
-                Picker("Profile", selection: Binding(get: { current.id }, set: { profileID = $0 })) {
+                CapsuleMenuPicker(label: "Profile", selection: Binding(get: { current.id }, set: { profileID = $0 }),
+                                  title: Text(current.name.isEmpty ? "Unnamed" : current.name)) {
                     ForEach(store.profiles) { profile in
                         Text(profile.name.isEmpty ? "Unnamed" : profile.name).tag(profile.id)
                     }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .fixedSize()
             } label: {
                 HStack(spacing: 8) {
                     Circle()

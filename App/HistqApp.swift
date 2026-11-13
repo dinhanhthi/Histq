@@ -14,6 +14,8 @@ enum HistqApp {
         // Start resolving git and the login shell's PATH (seconds, for writes) before the first repo needs them.
         GitToolchain.prepare()
         StatePaths.prepare()
+        // Read the last session off the main thread now; a launch without folders restores it.
+        SessionStore.startLoading()
         Preferences.registerDefaults()
         // Read the profiles off the main thread now, so a repo opened later finds its profile in memory.
         ProfileLibrary.shared.loadIfNeeded()
@@ -41,6 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let state: WindowState
         /// The toolbar's delegate and items' target, which the toolbar does not retain.
         let toolbar: HeaderToolbar
+        /// Native tab group changes (Merge All Windows, a tab dragged out), which save the session.
+        var tabGroupObservation: NSKeyValueObservation?
 
         init(window: NSWindow, model: WindowModel, state: WindowState, toolbar: HeaderToolbar) {
             self.window = window
@@ -51,21 +55,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private var entries: [Entry] = []
+    /// The tab position the windows' minimum sizes were last set for.
+    private var tabPosition = TabPosition.current
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Histq is dark mode only, whatever the system's appearance.
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.mainMenu = makeMainMenu()
+        // General › Tab position moves the tabs into panel 0, which the minimum width counts. Posted for every key,
+        // possibly off the main thread; only a change of the position re-clamps.
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: Preferences.defaults, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.preferencesChanged() }
+        }
+    }
+
+    private func preferencesChanged() {
+        let position = TabPosition.current
+        guard position != tabPosition else { return }
+        tabPosition = position
+        for entry in entries { WindowSizing.clampMinimum(of: entry.window) }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Folders given at launch (`open -a Histq <repo>`) arrive in `application(_:open:)` first and already made
-        // the window.
-        if entries.isEmpty { show(newWindow()) }
+        // the window: they are what this launch shows. Without any, the last session comes back once read.
+        guard entries.isEmpty else { return finishLaunching() }
+        Task { @MainActor in
+            await self.restoreLastSession()
+            self.finishLaunching()
+        }
+    }
+
+    /// The launch's windows are open: capture starts (saving them now, so a launch with folders is restorable too),
+    /// then the DEBUG `-HistqSelect` request.
+    private func finishLaunching() {
+        SessionStore.start { [unowned self] in self.currentSession() }
+        SessionStore.schedule()
         if let request = AppState.launchSelection {
             // Next turn, once the launch's folders are open as tabs.
             Task { @MainActor in self.target()?.model.select(request) }
         }
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-HistqOpenPalette") {
+            Task { @MainActor in await self.debugOpenPalette() }
+        }
+        #endif
+    }
+
+    #if DEBUG
+    /// DEBUG `-HistqOpenPalette "<query>"` (QA of the command palette): once the selected repo tab's refs, status and
+    /// log are read (the palette copies its rows when it opens), opens the front window's palette with `query` typed.
+    /// With `-HistqPaletteRun` it then runs the first row as Return does, once ranked; a confirmation the row asks is
+    /// accepted (as `-HistqRun` does) and the outcome goes to `operations.txt`. For QA on fixture copies only.
+    private func debugOpenPalette() async {
+        let value = AppState.launchFlag("-HistqOpenPalette") ?? ""
+        // An empty query may not reach the app as an argument: the next flag is then not the query.
+        let query = value.hasPrefix("-Histq") ? "" : value
+        for _ in 0..<200 {
+            guard let model = target()?.model else { return }
+            let session = model.selectedSession
+            let isRepoTab = model.selectedIndex.map { model.tabs[$0].repoURL != nil && !model.tabs[$0].isMissing } ?? false
+            if !isRepoTab || (session?.refs.value != nil && session?.status.value != nil && session?.log.value != nil) {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        guard let model = target()?.model else { return }
+        model.openPalette(query: query)
+        guard ProcessInfo.processInfo.arguments.contains("-HistqPaletteRun"), let palette = model.palette else { return }
+        for _ in 0..<250 {
+            if palette.isRankFresh { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard let item = palette.ranked.first else { return RepoMenus.debugLog("palette: no row for \(query)") }
+        let session = model.actionSession
+        guard model.performPalette(item) else { return RepoMenus.debugLog("palette: \(item.title) cannot run") }
+        if let session, let confirmation = session.confirmation {
+            session.confirmation = nil
+            session.run(confirmation.write, title: confirmation.operation, key: confirmation.key)
+        }
+        while session?.running.isEmpty == false { try? await Task.sleep(for: .milliseconds(50)) }
+        RepoMenus.debugLog(session?.failure.map { "fail palette \(item.title): \($0.message)" }
+            ?? "ok palette \(item.title)")
+    }
+    #endif
+
+    /// Quit saves the session while the windows are still open; the windows closing after it save nothing.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        SessionStore.saveForQuit()
+        return .terminateNow
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -90,8 +170,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return entries.first { $0.window === window }
     }
 
-    /// Creates a window with one Welcome tab; it is not shown yet.
-    private func newWindow() -> Entry {
+    /// Creates a window with one Welcome tab, at `frame` when it is on a screen (session restore); it is not shown yet.
+    private func newWindow(frame: NSRect? = nil) -> Entry {
         let model = WindowModel()
         let state = WindowState()
         let hosting = NSHostingController(
@@ -115,7 +195,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.isReleasedWhenClosed = false
         window.setContentSize(WindowSizing.initialSize(on: NSScreen.main))
         WindowSizing.clampMinimum(of: window)
-        if AppState.isStateDirMode {
+        if let frame, NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
+            // A restored frame (a QA run's comes from its own state dir); one on a screen that is gone is not used.
+            window.setFrame(frame, display: false)
+        } else if AppState.isStateDirMode {
             // QA runs never read or write the user's saved frame: AppKit keeps it in the standard defaults.
             window.center()
         } else if let anchor = target()?.window {
@@ -129,15 +212,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // A saved or copied frame may be smaller than today's minimum.
         WindowSizing.clampMinimum(of: window)
         window.delegate = self
+        DocumentWindow.configure(window, model: model) { [weak self] window in self?.openNativeTab(of: window) }
         model.closeWindow = { [weak window] in window?.performClose(nil) }
         let entry = Entry(window: window, model: model, state: state, toolbar: toolbar)
+        entry.tabGroupObservation = window.observe(\.tabGroup) { _, _ in
+            Task { @MainActor in SessionStore.schedule() }
+        }
         entries.append(entry)
+        trackSession(of: model)
         return entry
+    }
+
+    /// Saves the session when a window's tabs, its selected tab, or a tab's commit or profile change. Re-armed after
+    /// each change, as long as the window is open.
+    private func trackSession(of model: WindowModel) {
+        withObservationTracking {
+            _ = model.savedTabs
+            _ = model.selectedIndex
+        } onChange: { [weak self, weak model] in
+            // Called before the change lands, off any isolation: re-arm on the main actor once it has.
+            Task { @MainActor in
+                guard let self, let model, self.entries.contains(where: { $0.model === model }) else { return }
+                SessionStore.schedule()
+                self.trackSession(of: model)
+            }
+        }
+    }
+
+    // MARK: Session
+
+    /// Reopens the last session's windows: each native tab group in its tab order, with its selected tab, frames and
+    /// app tabs; the front group ends up key. No saved session (or none readable) shows one Welcome window.
+    private func restoreLastSession() async {
+        let loaded = await SessionStore.loaded()
+        // A folder opened while the session was read (Finder, the Dock) is what this launch shows.
+        guard entries.isEmpty else { return }
+        guard let loaded else { return show(newWindow()) }
+        // Back to front, so the front group is ordered in last.
+        for group in loaded.session.groups.reversed() {
+            let windows = group.map { saved in
+                let entry = newWindow(frame: saved.frame)
+                entry.model.restore(saved.tabs, selected: saved.selectedTab, missing: loaded.missing)
+                return entry
+            }
+            // The group's selected tab goes on screen first (no other tab flashes); the others join it in their saved
+            // order, each next to its neighbour (`.above` = after it, `.below` = before it).
+            let selected = group.firstIndex(where: \.isSelectedInGroup) ?? 0
+            windows[selected].window.orderFront(nil)
+            for index in windows.indices.dropFirst(selected + 1) {
+                windows[index - 1].window.addTabbedWindow(windows[index].window, ordered: .above)
+            }
+            for index in windows.indices.prefix(selected).reversed() {
+                windows[index + 1].window.addTabbedWindow(windows[index].window, ordered: .below)
+            }
+            windows[selected].window.makeKeyAndOrderFront(nil)
+        }
+        NSApp.activate()
+    }
+
+    /// The open windows as the session saves them: grouped by native tab group, groups front to back (the front
+    /// window's group first), each in its tab bar order.
+    private func currentSession() -> SavedSession {
+        var depth: [ObjectIdentifier: Int] = [:]
+        for (index, window) in NSApp.orderedWindows.enumerated() { depth[ObjectIdentifier(window)] = index }
+        let groups = Dictionary(grouping: entries) { entry in
+            entry.window.tabGroup.map(ObjectIdentifier.init) ?? ObjectIdentifier(entry.window)
+        }
+        let ordered = groups.values.sorted { lhs, rhs in
+            let left = lhs.compactMap { depth[ObjectIdentifier($0.window)] }.min() ?? Int.max
+            let right = rhs.compactMap { depth[ObjectIdentifier($0.window)] }.min() ?? Int.max
+            return left < right
+        }
+        var windows: [SavedWindow] = []
+        for (group, members) in ordered.enumerated() {
+            for entry in members {
+                let window = entry.window
+                let tabGroup = window.tabGroup
+                windows.append(SavedWindow(
+                    x: window.frame.minX, y: window.frame.minY, width: window.frame.width, height: window.frame.height,
+                    group: group,
+                    tabIndex: tabGroup?.windows.firstIndex(of: window) ?? 0,
+                    isSelectedInGroup: tabGroup.map { $0.selectedWindow === window } ?? true,
+                    tabs: entry.model.savedTabs,
+                    selectedTab: entry.model.selectedIndex))
+            }
+        }
+        return SavedSession(windows: windows)
     }
 
     private func show(_ entry: Entry) {
         entry.window.makeKeyAndOrderFront(nil)
         NSApp.activate()
+    }
+
+    /// The native tab bar's "+": a new window with a Welcome tab, as the next native tab of `window`'s group.
+    private func openNativeTab(of window: NSWindow) {
+        let entry = newWindow()
+        window.addTabbedWindow(entry.window, ordered: .above)
+        show(entry)
     }
 
     /// Opens each folder as a tab in the key window (a new window if there is none); files are ignored.
@@ -146,14 +318,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             url.isFileURL && (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         }
         guard !folders.isEmpty else { return }
+        #if DEBUG
+        if entries.isEmpty, let count = AppState.launchFlag("-HistqTabbedWindows").flatMap(Int.init), count > 1 {
+            return openTabbedWindows(folders, count: count)
+        }
+        #endif
         let entry = target() ?? newWindow()
         for folder in folders { entry.model.openTab(folder) }
         show(entry)
     }
 
+    #if DEBUG
+    /// DEBUG `-HistqTabbedWindows N` (QA of native tabs): the launch's folders spread over N windows (folder i in
+    /// window i mod N; a window without one keeps its Welcome tab), merged into one native tab group whose first tab
+    /// shows. The first window is on screen before the others join it, and is selected again at the end, so the
+    /// window `scripts/shot.sh` finds first is the one it captures.
+    private func openTabbedWindows(_ folders: [URL], count: Int) {
+        let group = (0..<count).map { _ in newWindow() }
+        for (index, folder) in folders.enumerated() { group[index % count].model.openTab(folder) }
+        show(group[0])
+        for (previous, entry) in zip(group, group.dropFirst()) {
+            previous.window.addTabbedWindow(entry.window, ordered: .above)
+        }
+        show(group[0])
+    }
+    #endif
+
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
+        // An open palette holds row closures over the window's sessions; drop it so they are freed with the window.
+        entries.first { $0.window === window }?.model.closePalette()
         entries.removeAll { $0.window === window }
+        SessionStore.schedule()
+    }
+
+    /// Frames, the front window and the selected native tab are part of the session.
+    func windowDidMove(_ notification: Notification) {
+        SessionStore.schedule()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        SessionStore.schedule()
+    }
+
+    func windowDidBecomeMain(_ notification: Notification) {
+        SessionStore.schedule()
     }
 
     /// The minimum size follows the screen the window is on.
@@ -216,6 +425,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !entry.model.closeSelectedTab() { entry.window.performClose(sender) }
     }
 
+    /// ⌘K: opens the key window's command palette, or closes it. A main menu item, so it works wherever the focus is
+    /// (the AppKit toolbar, a table, the palette's own field).
+    @objc func toggleCommandPalette(_ sender: Any?) {
+        guard let entry = target() else { return }
+        entry.model.togglePalette()
+    }
+
     /// Opens the Settings page in the key window.
     @objc func showSettings() {
         let entry = target() ?? newWindow()
@@ -253,6 +469,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         fileMenu.addItem(withTitle: "New Tab", action: #selector(newTab(_:)), keyEquivalent: "t").target = self
         fileMenu.addItem(withTitle: "Open…", action: #selector(openDocument(_:)), keyEquivalent: "o").target = self
         fileMenu.addItem(withTitle: "Clone…", action: #selector(cloneRepository(_:)), keyEquivalent: "").target = self
+        fileMenu.addItem(withTitle: "Command Palette…", action: #selector(toggleCommandPalette(_:)), keyEquivalent: "k")
+            .target = self
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab(_:)), keyEquivalent: "w").target = self
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "W")
@@ -279,8 +497,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 }
 
-/// A window's size limits. Its minimum fits the repo layout's three panels at their minimums
-/// (`RepoLayoutMetrics.minimumWindowSize`), but never exceeds the visible frame of the screen it is on. With a
+/// A window's size limits. Its minimum fits the repo layout's three panels at their minimums, and the vertical tabs
+/// in that position (`RepoLayoutMetrics.minimumWindowSize(tabPosition:)`), but never exceeds the visible frame of the screen it is on. With a
 /// full-size content view the frame and the content have the same size.
 @MainActor
 private enum WindowSizing {
@@ -289,7 +507,7 @@ private enum WindowSizing {
 
     /// `preferred`, at least the minimum, at most the screen's visible frame.
     static func initialSize(on screen: NSScreen?) -> NSSize {
-        let minimum = RepoLayoutMetrics.minimumWindowSize
+        let minimum = RepoLayoutMetrics.minimumWindowSize(tabPosition: .current)
         let size = NSSize(width: max(preferred.width, minimum.width), height: max(preferred.height, minimum.height))
         guard let visible = screen?.visibleFrame.size else { return size }
         return NSSize(width: min(size.width, visible.width), height: min(size.height, visible.height))
@@ -298,7 +516,7 @@ private enum WindowSizing {
     /// Sets the window's minimum size for its screen, and grows the window (top edge kept, inside the screen) when
     /// it is smaller than that.
     static func clampMinimum(of window: NSWindow) {
-        let minimum = RepoLayoutMetrics.minimumWindowSize
+        let minimum = RepoLayoutMetrics.minimumWindowSize(tabPosition: .current)
         guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else {
             window.minSize = minimum
             return

@@ -85,7 +85,10 @@ final class RefBadgeCellView: NSView {
         static let padding: CGFloat = 7
         static let gap: CGFloat = 4
         static let iconGap: CGFloat = 3
+        /// The check's slot. The laptop, cloud and tag get `refIcon`: bigger, so they read at a glance (user,
+        /// 2026-11-13); the text and the badge height stay.
         static let icon: CGFloat = 12
+        static let refIcon: CGFloat = 15
         static let radius: CGFloat = 5
         /// A badge's height, less in a row too short for it (compact).
         static let height: CGFloat = 22
@@ -93,10 +96,16 @@ final class RefBadgeCellView: NSView {
         static let trailing: CGFloat = 8
     }
 
-    /// SF Symbols in the badge text color.
+    /// A glyph's slot width: the check keeps the small one.
+    private static func iconWidth(_ name: String) -> CGFloat {
+        name == "checkmark" ? Style.icon : Style.refIcon
+    }
+
+    /// SF Symbols in the badge text color, drawn at a size that fills their slot (the cloud and tag are 16 pt wide at
+    /// 12 pt, scaled down to 15; at 10.5 pt they stayed 14).
     @MainActor private static func symbol(_ name: String) -> NSImage? {
         if let cached = symbols[name] { return cached }
-        let configuration = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .regular)
+        let configuration = NSImage.SymbolConfiguration(pointSize: name == "checkmark" ? 10.5 : 12, weight: .regular)
             .applying(NSImage.SymbolConfiguration(paletteColors: [Palette.graphBadgeText]))
         let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(configuration)
@@ -125,7 +134,7 @@ final class RefBadgeCellView: NSView {
     /// The badge's width without its name, and its name's width.
     private static func widths(_ badge: RefBadge) -> (chrome: CGFloat, name: CGFloat) {
         let (leading, trailing) = icons(badge)
-        var chrome = 2 * Style.padding + CGFloat(leading.count + trailing.count) * (Style.icon + Style.iconGap)
+        var chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + iconWidth($1) + Style.iconGap }
         if let counts = aheadBehind(badge) {
             chrome += Style.iconGap + ceil((counts as NSString).size(withAttributes: Style.count).width)
         }
@@ -254,11 +263,11 @@ final class RefBadgeCellView: NSView {
         var x = rect.minX + Style.padding
         for name in leading {
             drawIcon(name, x: x, midY: rect.midY)
-            x += Style.icon + Style.iconGap
+            x += Self.iconWidth(name) + Style.iconGap
         }
         var trailingX = rect.maxX - Style.padding
         for name in trailing.reversed() {
-            trailingX -= Style.icon
+            trailingX -= Self.iconWidth(name)
             drawIcon(name, x: trailingX, midY: rect.midY)
             trailingX -= Style.iconGap
         }
@@ -277,11 +286,12 @@ final class RefBadgeCellView: NSView {
 
     private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat) {
         guard let image = Self.symbol(name) else { return }
+        let slot = Self.iconWidth(name)
         let size = image.size
-        let scale = min(1, Style.icon / max(size.width, size.height))
+        let scale = min(1, slot / max(size.width, size.height))
         let width = size.width * scale
         let height = size.height * scale
-        image.draw(in: CGRect(x: x + (Style.icon - width) / 2, y: midY - height / 2, width: width, height: height))
+        image.draw(in: CGRect(x: x + (slot - width) / 2, y: midY - height / 2, width: width, height: height))
     }
 }
 

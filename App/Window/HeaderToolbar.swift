@@ -89,13 +89,16 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         branchItem.visibilityPriority = .high
         profileItem.visibilityPriority = .high
 
-        // Phase 9 wires Undo and Redo to the operation journal; Phase 13 opens the repo in a terminal; the Phase 8
-        // palette opens from Search.
+        // Phase 9 wires Undo and Redo to the operation journal; Phase 13 opens the repo in a terminal. Search opens
+        // the command palette.
         configureButton(undoItem, label: "Undo", systemImage: "arrow.uturn.backward")
         configureButton(redoItem, label: "Redo", systemImage: "arrow.uturn.forward")
         configureButton(terminalItem, label: "Terminal", systemImage: "terminal")
         configureButton(searchItem, label: "Search", systemImage: "magnifyingglass")
-        for item in [undoItem, redoItem, terminalItem, searchItem] { item.isEnabled = false }
+        for item in [undoItem, redoItem, terminalItem] { item.isEnabled = false }
+        searchItem.label = "Command Palette"
+        searchItem.toolTip = "Command Palette (⌘K)"
+        searchItem.action = #selector(togglePalette(_:))
 
         for (item, action) in actionItems {
             configureButton(item, label: action.title, systemImage: action.systemImage)
@@ -302,6 +305,10 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         model.toggleSettings()
     }
 
+    @objc private func togglePalette(_ sender: Any?) {
+        model.togglePalette()
+    }
+
     // MARK: Menus
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -309,8 +316,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         case repoItem.menu: repoEntries()
         case branchItem.menu: model.actionSession.map(RepoMenus.branchPicker) ?? []
         case profileItem.menu: model.actionSession.map { ProfilePicker.entries(session: $0, model: model) } ?? []
-        case pullItem.menu: pullEntries()
-        case pushItem.menu: pushEntries()
+        case pullItem.menu: model.actionSession.map(RepoMenus.pull) ?? []
+        case pushItem.menu: model.actionSession.map(RepoMenus.push) ?? []
         default: []
         }
         let built = MenuBuilder.menu(entries)
@@ -346,37 +353,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         }]
         return entries
     }
-
-    /// Fetch all, then each pull mode.
-    private func pullEntries() -> [MenuEntry] {
-        guard let session = model.actionSession else { return [] }
-        let enabled = session.currentBranch != nil
-        return [
-            .action("Fetch All") { session.fetchAll() },
-            .separator,
-            .action("Pull (fast-forward if possible)", enabled: enabled) { session.pull(.fastForward) },
-            .action("Pull (fast-forward only)", enabled: enabled) { session.pull(.fastForwardOnly) },
-            .action("Pull (rebase)", enabled: enabled) { session.pull(.rebase) },
-        ]
-    }
-
-    /// Push, or force push with lease (confirmed).
-    private func pushEntries() -> [MenuEntry] {
-        guard let session = model.actionSession, let branch = session.currentBranch,
-              let target = session.pushTarget(of: branch) else { return [] }
-        return [
-            .action("Push") { session.push(branch: branch, key: .push) },
-            .action("Force Push (with lease)…", enabled: target.lease != nil) {
-                session.push(branch: branch, force: true, key: .push)
-            },
-        ]
-    }
 }
 
 // MARK: - Repo actions
 
-/// A repo action of the toolbar's buttons.
-private enum ToolbarAction {
+/// A repo action of the toolbar's buttons; the command palette lists the same actions (`PaletteCommands`).
+enum ToolbarAction: CaseIterable {
     case pull, push, fetch, branch, stash, pop
 
     var key: ActionBarAction {

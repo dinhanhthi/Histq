@@ -299,7 +299,10 @@ final class RepoSession: Identifiable {
     /// with no profile before the repo's own is known.
     @ObservationIgnored private var profileTask: Task<Void, Never>?
     /// Set once the repo resolved its profile or the user picked one; a late store read then changes nothing.
-    @ObservationIgnored private var profileResolved = false
+    @ObservationIgnored private(set) var profileResolved = false
+    /// The selection came from session restore and is not loaded yet: if its commit is gone, the tab opens as a new
+    /// one does instead of showing an error.
+    @ObservationIgnored private var selectionIsRestored = false
 
     /// The runner and the folders, set up once (`backend()`).
     @ObservationIgnored private var setUpTask: Task<Backend, Error>?
@@ -476,6 +479,24 @@ final class RepoSession: Identifiable {
         }
     }
 
+    /// Session restore: the tab's profile as that session had it, which wins over the repo's remembered one. Unlike
+    /// `setProfile`, the repo's remembered profile is left as it is. A write still waits for the store's first read.
+    func restoreProfile(_ id: UUID?) {
+        profileResolved = true
+        profileTask?.cancel()
+        let library = ProfileLibrary.shared
+        profileTask = library.store == nil ? Task { _ = await library.loaded() } : nil
+        if profileID != id { profileID = id }
+    }
+
+    /// Session restore: the graph's commit before the tab's first `select`, which loads it (no `select` timing line:
+    /// no click). A commit that is gone falls back to `.overview`.
+    func restoreSelection(_ commit: String) {
+        selection = .commit(commit)
+        graphSelection = [.commit(commit)]
+        selectionIsRestored = true
+    }
+
     /// The profile a write runs with: waits for the store's first read when the tab opened before it ended.
     private func writeProfile() async -> Profile? {
         await profileTask?.value
@@ -575,8 +596,10 @@ final class RepoSession: Identifiable {
         detail = .loading
         detailTask?.cancel()
         let token = selectToken
+        let isRestored = selectionIsRestored
+        selectionIsRestored = false
         detailTask = Task { [weak self] in
-            await self?.loadDetail(selection, token: token)
+            await self?.loadDetail(selection, token: token, isRestored: isRestored)
         }
     }
 
@@ -611,7 +634,7 @@ final class RepoSession: Identifiable {
         }
     }
 
-    private func loadDetail(_ selection: Selection, token: Int) async {
+    private func loadDetail(_ selection: Selection, token: Int, isRestored: Bool = false) async {
         do {
             let backend = try await backend()
             // The log loads once per session, beside the detail; a tab switch does not restart it.
@@ -664,6 +687,12 @@ final class RepoSession: Identifiable {
             detail = .loaded(loaded)
         } catch {
             guard token == selectToken, !Self.isCancellation(error) else { return }
+            if isRestored, case .commit = selection {
+                // A restored commit that was amended, rebased away or collected: open as a new tab does.
+                graphSelection = []
+                select(.overview)
+                return
+            }
             let message = Self.message(for: error)
             detail = .failed(message)
             failUnread(message)

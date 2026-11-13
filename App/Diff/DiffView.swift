@@ -152,7 +152,8 @@ private struct DiffHeaderCard: View {
                             compact: true)
                     .fixedSize()
             }
-            .frame(height: 28)
+            // As tall as the compact tabs' padded track (24 pt pills inset 4 pt), the sidebar's look.
+            .frame(height: 32)
         }
     }
 

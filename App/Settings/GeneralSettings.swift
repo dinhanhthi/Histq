@@ -1,9 +1,10 @@
-// Settings › General: the default profile of new tabs, pulling and fetching, the external merge tool and the git
+// Settings › General: where the tabs show, the default profile of new tabs, pulling and fetching, the external merge tool and the git
 // executable. Each change is saved at once in `Preferences.defaults` (the default profile in the profile store).
 import HistqCore
 import SwiftUI
 
 struct GeneralSettings: View {
+    @AppStorage(PrefKey.tabPosition.rawValue, store: Preferences.defaults) private var tabPosition = "top"
     @AppStorage(PrefKey.pullMode.rawValue, store: Preferences.defaults) private var pullMode = "fastForward"
     @AppStorage(PrefKey.autoFetchMinutes.rawValue, store: Preferences.defaults) private var autoFetchMinutes = 0
     @AppStorage(PrefKey.pruneOnFetch.rawValue, store: Preferences.defaults) private var pruneOnFetch = false
@@ -23,19 +24,26 @@ struct GeneralSettings: View {
 
     var body: some View {
         SettingsPageGate(section: .general, isLoaded: true) {
+            SettingsGroup("Tabs") {
+                LabeledContent {
+                    CapsuleTabs(selection: $tabPosition, tabs: [TabPosition.top.rawValue, TabPosition.left.rawValue],
+                                title: { $0 == TabPosition.left.rawValue ? Text("Left") : Text("Top") }, compact: true)
+                        .fixedSize()
+                } label: {
+                    Text("Tab position")
+                    SettingsHint("Top: a strip under the toolbar. Left: a column beside the panels.")
+                }
+            }
             SettingsGroup("New tabs") {
                 defaultProfileRow
             }
             SettingsGroup("Pull and fetch") {
                 LabeledContent {
-                    Picker("Pull", selection: $pullMode) {
-                        Text("Fast-forward if possible, else merge").tag("fastForward")
-                        Text("Fast-forward only").tag("fastForwardOnly")
-                        Text("Rebase").tag("rebase")
+                    CapsuleMenuPicker(label: "Pull", selection: $pullMode, title: Text(Self.pullTitle(pullMode))) {
+                        ForEach(Self.pullModes, id: \.self) { mode in
+                            Text(Self.pullTitle(mode)).tag(mode)
+                        }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .fixedSize()
                 } label: {
                     Text("Pull")
                     SettingsHint("What the toolbar's Pull button does.")
@@ -75,6 +83,18 @@ struct GeneralSettings: View {
         .task(id: gitCheck) { await checkGit() }
     }
 
+    // MARK: Pull
+
+    private static let pullModes = ["fastForward", "fastForwardOnly", "rebase"]
+
+    private static func pullTitle(_ mode: String) -> String {
+        switch mode {
+        case "fastForwardOnly": "Fast-forward only"
+        case "rebase": "Rebase"
+        default: "Fast-forward if possible, else merge"
+        }
+    }
+
     // MARK: Default profile
 
     @ViewBuilder
@@ -82,18 +102,16 @@ struct GeneralSettings: View {
         LabeledContent {
             switch library.state {
             case .loaded(let store):
-                Picker("Default profile", selection: Binding(
+                CapsuleMenuPicker(label: "Default profile", selection: Binding(
                     get: { store.defaultProfile?.id },
-                    set: { library.setDefault($0) })
+                    set: { library.setDefault($0) }),
+                    title: Text(store.defaultProfile?.name ?? "None")
                 ) {
                     Text("None").tag(UUID?.none)
                     ForEach(store.profiles) { profile in
                         Text(profile.name).tag(UUID?.some(profile.id))
                     }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .fixedSize()
             case .failed:
                 Text("Unavailable").foregroundStyle(.secondary)
             case .idle, .loading:

@@ -767,6 +767,8 @@ final class DiffHunkCellView: NSView {
         for (index, (action, title)) in buttons.enumerated() {
             let button = NSButton(title: title, target: self, action: #selector(pressed(_:)))
             button.bezelStyle = .push
+            // Every button of the app is a capsule (user, 2026-11-13); before macOS 26 AppKit has no shape to pick.
+            if #available(macOS 26, *) { button.borderShape = .capsule }
             button.controlSize = .small
             button.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
             button.tag = index

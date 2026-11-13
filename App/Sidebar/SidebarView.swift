@@ -71,6 +71,10 @@ private enum SidebarMetrics {
     /// (12) and a gap (6), 28 pt into the card; a row starts at the card padding (6) plus this, so the rows' icons
     /// line up with the section's own icon.
     static let rowLeading: CGFloat = 28 - cardPadding
+    /// A row's icon slot (glyphs leading-aligned in it, under the section's icon) and the gap from it to the name:
+    /// tight, so the name sits close to a narrow branch glyph (user, 2026-11-13).
+    static let iconSlot: CGFloat = 20
+    static let iconGap: CGFloat = 4
     /// The extra indent of a remote's branches under the remote's row: one step, as GitKraken nests them.
     static let nestedIndent: CGFloat = 16
     /// The section and row icons (GitKraken's): Local is this Mac, Remote the cloud, each branch a branch.
@@ -266,9 +270,9 @@ private struct RemoteRow: View {
     let name: String
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: SidebarMetrics.iconGap) {
             Image(systemName: "server.rack")
-                .frame(width: 20, alignment: .leading)
+                .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             Text(name)
                 .font(.body.weight(.medium))
                 .lineLimit(1)
@@ -301,10 +305,10 @@ private struct BranchRow<Trailing: View>: View {
 
     var body: some View {
         let selected = session.sidebarSelection == item
-        HStack(spacing: 8) {
+        HStack(spacing: SidebarMetrics.iconGap) {
             // Leading-aligned in its slot, so every glyph starts where the section header's icon does.
             Image(systemName: systemImage)
-                .frame(width: 20, alignment: .leading)
+                .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
             HStack(spacing: 4) {
                 Text(name)
                     .lineLimit(1)
@@ -389,9 +393,9 @@ private struct SkeletonRows: View {
 
     var body: some View {
         ForEach(fractions.indices, id: \.self) { index in
-            HStack(spacing: 8) {
+            HStack(spacing: SidebarMetrics.iconGap) {
                 SkeletonLine(width: 14, height: 14)
-                    .frame(width: 20, alignment: .leading)
+                    .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
                 SkeletonLine(fraction: fractions[index], height: 11)
             }
             .padding(.leading, SidebarMetrics.rowLeading)
