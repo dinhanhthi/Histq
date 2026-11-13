@@ -35,15 +35,20 @@ enum Palette {
     static let skeletonFill = color(.white.withAlphaComponent(0.10))
     /// Darkens a pressed button over its own fill.
     static let pressedOverlay = color(.black.withAlphaComponent(0.2))
-    /// Dims the window behind an in-window modal (`SettingsModal`), over the page's light backdrop blur.
-    static let scrim = color(.black.withAlphaComponent(0.45))
-    /// Text and glyphs on the gold accent fill: primary buttons, the selected tab (user decision 2026-11-13: white).
+    /// Dims the window behind an open modal or the command palette (`ModalScrim`), over the content's light blur
+    /// (`ModalBackdrop`). 0.55: a little darker than the 0.45 before task 9.6, so the card stands out from the blur.
+    static let scrim = color(.black.withAlphaComponent(0.55))
+    /// Text and glyphs on the blue accent fill: primary buttons, the selected tab (user decision 2026-11-13: white).
+    /// The accent (`AccentColor`, the logo's mid blue #2F86FB) holds white at 3.54:1, enough for its pills' labels.
     static let onAccent = color(.white)
-    /// The fill of primary buttons (Commit, Save, Keep File): a deeper gold leaning to orange, so their white label
-    /// reads at 4.68:1 (WCAG AA for body text). Not the accent: #FDBB07 under white text is only 1.71:1, but the
-    /// selected pills, the switches and the focus ring keep it. #A86400
-    static let primaryFill = color(srgb(0xA86400))
-    /// A primary button's label shadow: lifts the white text off the gold so it stands out more (user, 2026-11-13).
+    /// The fill of primary buttons (Commit, Save, Keep File): the logo's deep blue, so their white label reads at
+    /// 5.82:1 (WCAG AA for body text). Not the accent: #2F86FB under white text is only 3.54:1, enough for the
+    /// selected pills, but not for a button's body text. #115CDE
+    static let primaryFill = color(srgb(0x115CDE))
+    /// The fill of a destructive confirmation's button (Delete Branch, Discard): a deep red, so its white label reads
+    /// at 5.9:1 like the primary blue's. #C0282D
+    static let destructiveFill = color(srgb(0xC0282D))
+    /// A primary button's label shadow: lifts the white text off the blue so it stands out more (user, 2026-11-13).
     static let onPrimaryShadow = Color.black.opacity(0.4)
     static let switchOffFill = color(.white.withAlphaComponent(0.22))
     /// The shadow of the switch's white knob.
@@ -81,8 +86,8 @@ enum Palette {
 
     // MARK: Commit graph (AppKit: the graph draws in `draw(_:)`, so these are `NSColor`s)
 
-    /// The 8 lane colors, in palette order (`GraphRow.color`): gold (the accent's family), teal, blue, purple, magenta,
-    /// green, coral, lime; neighbours differ in hue so adjacent lanes stay apart, all bright on `surface` #2C2C2E.
+    /// The 8 lane colors, in palette order (`GraphRow.color`): gold, teal, blue, purple, magenta, green, coral, lime;
+    /// neighbours differ in hue so adjacent lanes stay apart, all bright on `surface` #2C2C2E.
     /// #F2B630 #4FB8D6 #5E8EF0 #AC74E8 #E260B0 #5CC98A #F07F5C #C2CF4A
     private static let laneValues: [NSColor] = [
         srgb(0xF2B630), srgb(0x4FB8D6), srgb(0x5E8EF0), srgb(0xAC74E8),
@@ -239,35 +244,58 @@ struct RaisedButtonStyle: ButtonStyle {
     }
 }
 
+extension EnvironmentValues {
+    /// Inside a `ModalCard`'s footer: its `formRow` buttons take the footer's larger size (`ModalFooterMetrics`).
+    @Entry var isModalFooter = false
+}
+
+/// The buttons of a modal's footer (user, 2026-11-13): roomier and a bit bigger than a form row's.
+enum ModalFooterMetrics {
+    static let buttonHeight: CGFloat = 30
+    static let buttonPadding: CGFloat = 16
+    static let buttonFont: Font = .system(size: 14, weight: .medium)
+    static let spacing: CGFloat = 12
+    /// Above the buttons (under the last card) and below them; with the container's own padding about 16 pt each.
+    static let verticalPadding: CGFloat = 10
+    /// From the container's trailing edge, with its padding: the same 16 pt.
+    static let trailingPadding: CGFloat = 10
+}
+
 /// A small text button of a card row: a capsule of the input color, lighter on hover, darker while pressed.
-/// `formRow`: as tall as a compact `CapsuleTabs` item, for a form row. `prominent`: `Palette.primaryFill` with white
-/// text (`PrimaryLabelShadow`).
+/// `formRow`: as tall as a compact `CapsuleTabs` item, for a form row; in a modal's footer, the footer's size
+/// (`ModalFooterMetrics`). `prominent`: `Palette.primaryFill` with white text (`PrimaryLabelShadow`).
 struct RowTextButtonStyle: ButtonStyle {
     var formRow = false
     var prominent = false
+    /// With `prominent`: the red `Palette.destructiveFill` (a confirmation's Delete), not the blue.
+    var destructive = false
 
     func makeBody(configuration: Configuration) -> some View {
-        Highlight(configuration: configuration, formRow: formRow, prominent: prominent)
+        Highlight(configuration: configuration, formRow: formRow, prominent: prominent, destructive: destructive)
     }
 
     private struct Highlight: View {
         let configuration: ButtonStyleConfiguration
         let formRow: Bool
         let prominent: Bool
+        let destructive: Bool
         @State private var hovered = false
         @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.isModalFooter) private var isModalFooter
 
         var body: some View {
+            let footer = formRow && isModalFooter
             configuration.label
-                .font(formRow ? .body : .callout.weight(.medium))
+                .font(footer ? ModalFooterMetrics.buttonFont : formRow ? .body : .callout.weight(.medium))
                 .foregroundStyle(prominent ? AnyShapeStyle(Palette.onAccent) : AnyShapeStyle(.primary))
                 .modifier(PrimaryLabelShadow(isOn: prominent))
-                .padding(.horizontal, formRow ? 12 : 8)
+                .padding(.horizontal, footer ? ModalFooterMetrics.buttonPadding : formRow ? 12 : 8)
                 .padding(.vertical, formRow ? 0 : 4)
-                .frame(height: formRow ? 24 : nil)
+                .frame(height: footer ? ModalFooterMetrics.buttonHeight : formRow ? 24 : nil)
                 .background(
                     Capsule()
-                        .fill(prominent ? AnyShapeStyle(Palette.primaryFill) : AnyShapeStyle(Palette.inputSurface))
+                        .fill(prominent ? AnyShapeStyle(destructive ? Palette.destructiveFill : Palette.primaryFill)
+                              : AnyShapeStyle(Palette.inputSurface))
                         .overlay(Capsule().fill(
                             configuration.isPressed ? Palette.pressedOverlay : hovered && isEnabled ? Palette.hoverFill : .clear)))
                 .contentShape(Capsule())
@@ -368,7 +396,7 @@ struct SidebarItemStyle: ButtonStyle {
     }
 }
 
-/// The white label of a primary (`Palette.primaryFill`) button gets a faint dark shadow, so it stands out from the gold.
+/// The white label of a primary (`Palette.primaryFill`) button gets a faint dark shadow, so it stands out from the blue.
 /// On the label only, before the fill, so the capsule itself casts nothing.
 private struct PrimaryLabelShadow: ViewModifier {
     let isOn: Bool
@@ -527,10 +555,10 @@ struct CapsuleMenuPicker<Value: Hashable, Content: View>: View {
 /// before): the selected tab is an accent capsule that slides between the tabs (no slide under Reduce Motion).
 /// `compact`: smaller, always on a surface capsule, for a form row or a card header; it has the sidebar's look (the
 /// pill inset `fillInset` from the track's edge, caption text), so every segmented choice in the app matches the
-/// Branches / Tags / PRs tabs (user, 2026-11-13). `fillsWidth`: the track takes the width it is offered and the tabs
-/// share it equally, inset `fillInset` from its edge so the pill floats inside it; with
-/// `systemImage`, each tab shows its icon and title, or its icon alone when the title does not fit (never truncated).
-/// Every shape is a true capsule (`.circular`: radius = half the height), so the pill and the track are concentric.
+/// Branches / Tags / PRs tabs (user, 2026-11-13). `fillsWidth`: the track takes the width it is offered and each tab
+/// gets its label's width plus an equal share of the rest (`ContentWidthRow`), inset `fillInset` from its edge so the
+/// pill floats inside it; with `systemImage`, each tab shows its icon and title, or its icon alone when the title
+/// does not fit (never truncated). Every shape is a true capsule (`.circular`: radius = half the height), so the pill and the track are concentric.
 struct CapsuleTabs<Tab: Hashable>: View {
     @Binding var selection: Tab
     let tabs: [Tab]
@@ -545,7 +573,8 @@ struct CapsuleTabs<Tab: Hashable>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 2) {
+        let layout = fillsWidth ? AnyLayout(ContentWidthRow(spacing: 2)) : AnyLayout(HStackLayout(spacing: 2))
+        layout {
             ForEach(tabs, id: \.self) { tab in
                 Item(tab: tab, title: title(tab), help: help?(tab), systemImage: systemImage?(tab),
                      selected: tab == selection, compact: compact, fillsWidth: fillsWidth, namespace: namespace) {
@@ -566,6 +595,37 @@ struct CapsuleTabs<Tab: Hashable>: View {
 
     /// The gap between a `fillsWidth` track's edge and its tabs, on every side.
     static var fillInset: CGFloat { 4 }
+
+    /// The `fillsWidth` row (user, 2026-11-13): each tab as wide as its label plus the same padding, then an equal share
+    /// of the spare width, so a longer label (Branches) gets a wider tab and the track still fills its width. When the
+    /// labels do not fit, equal shares (the tabs then show their icons alone).
+    private struct ContentWidthRow: Layout {
+        let spacing: CGFloat
+
+        func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+            let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+            let natural = sizes.reduce(0) { $0 + $1.width } + gaps(subviews)
+            return CGSize(width: proposal.width ?? natural, height: sizes.map(\.height).max() ?? 0)
+        }
+
+        func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+            let ideal = subviews.map { $0.sizeThatFits(.unspecified).width }
+            let available = bounds.width - gaps(subviews)
+            let spare = available - ideal.reduce(0, +)
+            let count = CGFloat(max(subviews.count, 1))
+            var x = bounds.minX
+            for (index, subview) in subviews.enumerated() {
+                let width = spare >= 0 ? ideal[index] + spare / count : available / count
+                subview.place(at: CGPoint(x: x, y: bounds.midY), anchor: .leading,
+                              proposal: ProposedViewSize(width: width, height: bounds.height))
+                x += width + spacing
+            }
+        }
+
+        private func gaps(_ subviews: Subviews) -> CGFloat {
+            spacing * CGFloat(max(subviews.count - 1, 0))
+        }
+    }
 
     private var animation: Animation? { reduceMotion ? nil : Motion.standard }
 
@@ -608,7 +668,7 @@ struct CapsuleTabs<Tab: Hashable>: View {
                     .lineLimit(1)
                     .foregroundStyle(selected ? Palette.onAccent : Color.secondary)
                     .padding(.horizontal, fillsWidth ? 4 : compact ? 10 : 12)
-                    // Same flexibility for every tab, so the HStack gives each an equal share.
+                    // Takes the width `ContentWidthRow` gives it; its label's width is its ideal.
                     .frame(minWidth: fillsWidth ? 0 : nil, maxWidth: fillsWidth ? .infinity : nil)
                     .frame(height: height)
                     .background {
@@ -818,10 +878,10 @@ extension ToolbarContent {
     }
 }
 
-/// Spacing of the settings pages (a 4 pt scale). The sidebar card starts at the top of the content area, about 8 pt
-/// under the header's capsules, and the page beside it starts at the same top edge: its first element (a card's
-/// title, or the card itself) is top-aligned with the sidebar card. Only the tab layout, which has no sidebar, starts
-/// its page `contentTopOffset` lower.
+/// Spacing of the settings pages (a 4 pt scale). In the Settings modal the sidebar card starts under the header card,
+/// and the page beside it starts at the same top edge: its first element (a card's title, or the card itself) is
+/// top-aligned with the sidebar card. Only the tab layout, which has no sidebar, starts its page `contentTopOffset`
+/// lower.
 enum SettingsMetrics {
     /// Corner radius of a content card (`GlassCard`'s default).
     static let cardRadius: CGFloat = 14
@@ -833,11 +893,10 @@ enum SettingsMetrics {
     static let rowPadding: CGFloat = 10
     /// Outer padding of a page's scroll content (trailing, bottom, and leading without a sidebar).
     static let pagePadding: CGFloat = 20
-    /// The sidebar card: width, corner radius, rows' inset inside it.
+    /// The sidebar card: width, rows' inset inside it.
     static let sidebarWidth: CGFloat = 200
-    static let sidebarRadius: CGFloat = 20
     static let sidebarRowsPadding: CGFloat = 10
-    /// The sidebar card's inset from the window's leading and bottom edges, and the gap from it to the page.
+    /// The gap from the sidebar card to the page, and under the page's last card.
     static let sidebarInset: CGFloat = 12
     /// Tab layout only: the page's top gap under the top of the content area (about 20 pt under the header's
     /// capsules). Never in the sidebar layout, whose page is top-aligned with the sidebar card.
@@ -1001,90 +1060,160 @@ private struct SettingsInputChrome: ViewModifier {
     }
 }
 
-/// The page behind an open `SettingsModal`.
-enum SettingsModalBackdrop {
-    /// A light blur of the page behind the scrim, so its sidebar and cards stay faintly readable. The caller applies it
-    /// to the page with `.blur(radius:opaque: false)`, animated with the scrim.
-    static let blurRadius: CGFloat = 2.5
+// MARK: - Modals
+
+/// The window content behind an open modal or the command palette (task 9.6).
+enum ModalBackdropMetrics {
+    /// A light Gaussian blur of the content (user, 2026-11-13: visibly blurred, not only dimmed): the panels, cards
+    /// and graph lanes keep their shapes and colors under the scrim, the small text does not stay legible.
+    static let blurRadius: CGFloat = 3
 }
 
-/// A centered in-window modal: a `Palette.scrim` over the area it fills (a click dismisses it unless
-/// `dismissOnBackdropTap` is false), and a raised `GlassCard` (radius 20) `min(area - 80, 760)` wide, floored at
-/// `minWidth`, as tall as the area minus 40 pt above and below. Not a `.sheet`, so it looks the same on every macOS.
-/// Put it last in the page's root `ZStack`. It fades in and scales from 0.96 with the caller's `Motion.sheet` and
-/// leaves with `Motion.exit` (a fade only under Reduce Motion); the scrim click and Esc close it with `Motion.sheet`.
-struct SettingsModal<Content: View>: View {
-    let isPresented: Bool
-    /// The width of the area it fills; the card sizes itself from it.
-    let containerWidth: CGFloat
-    /// The card's minimum width: the content's own minimum.
-    var minWidth: CGFloat = 480
-    /// When false, a scrim click does nothing (it still blocks the page): for unsaved input, closed only by its own
-    /// buttons or Esc.
-    var dismissOnBackdropTap = true
-    /// Called when a scrim click or Esc dismisses it.
-    let onDismiss: () -> Void
-    @ViewBuilder let content: () -> Content
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+/// The window content behind an open modal: blurred a little (`ModalBackdropMetrics.blurRadius`), disabled (so its
+/// keyboard shortcuts, such as the diff's Escape or the commit's ⌘Return, never fire under the modal) and hidden from
+/// accessibility. A render effect on the content as it is: nothing in it is rebuilt. The blur fades in with
+/// `Motion.sheet` and out with `Motion.exit` (also under Reduce Motion: it is not movement), animated alone.
+struct ModalBackdrop: ViewModifier {
+    let isActive: Bool
+    /// Follows `isActive` just after the modal shows, at once when it closes: disabling re-evaluates every view of
+    /// the content that reads `isEnabled` (4-5 ms with a repo tab), which would delay the modal's first frame. The
+    /// scrim takes every click meanwhile, and the focus only moves into the modal on the next turn.
+    @State private var isDisabled = false
+    /// The latest `isActive`, for the delayed update (the struct's own value is captured as it was). Never read by
+    /// `body`, so writing it re-evaluates nothing.
+    @State private var wantsDisabled = false
 
-    private static var sideMargin: CGFloat { 40 }
-    /// From the area's top and bottom edges. 40 also clears the traffic lights (they end at about y 33) when the
-    /// modal fills the whole window.
-    private static var verticalMargin: CGFloat { 40 }
-    private static var maxWidth: CGFloat { 760 }
-    private static var cornerRadius: CGFloat { 20 }
-
-    private var cardWidth: CGFloat {
-        max(minWidth, min(containerWidth - 2 * Self.sideMargin, Self.maxWidth))
+    func body(content: Content) -> some View {
+        content
+            .disabled(isDisabled)
+            .accessibilityHidden(isActive)
+            .animation(isActive ? Motion.sheet : Motion.exit) { view in
+                view.blur(radius: isActive ? ModalBackdropMetrics.blurRadius : 0, opaque: false)
+            }
+            .onChange(of: isActive, initial: true) { _, active in
+                wantsDisabled = active
+                guard active else { return isDisabled = false }
+                // A timer, not the next main-queue turn, so the modal's frame is drawn first.
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1)) { isDisabled = wantsDisabled }
+            }
     }
+}
 
-    /// In with the caller's animation, out faster.
-    private var scrimTransition: AnyTransition {
-        .asymmetric(insertion: .opacity, removal: .opacity.animation(Motion.exit))
-    }
-
-    /// A fade and a scale from 0.96, centered; a fade only under Reduce Motion.
-    private var cardTransition: AnyTransition {
-        if reduceMotion {
-            return .asymmetric(insertion: .opacity, removal: .opacity.animation(Motion.exit))
-        }
-        let fadeScale = AnyTransition.opacity.combined(with: .scale(scale: 0.96))
-        return .asymmetric(insertion: fadeScale, removal: fadeScale.animation(Motion.exit))
-    }
-
-    private func dismiss() {
-        withAnimation(Motion.sheet) { onDismiss() }
-    }
+/// The scrim of an open modal or the command palette: `Palette.scrim` over the window content (under the toolbar,
+/// which stays live). A click runs `onTap` (closing the palette or a confirmation; a form ignores it).
+struct ModalScrim: View {
+    var onTap: () -> Void = {}
 
     var body: some View {
-        // One layer in both states. To fill the whole window (a header drawn by SwiftUI, no SwiftUI toolbar), the
-        // caller puts `.ignoresSafeArea()` on this view, never inside the `if`s: on a view being inserted it takes
-        // effect only when the transition ends, so the card would animate in too low and then jump up.
-        ZStack {
-            if isPresented {
-                Rectangle()
-                    .fill(Palette.scrim)
-                    .onTapGesture {
-                        if dismissOnBackdropTap { dismiss() }
-                    }
-                    .transition(scrimTransition)
-                    .zIndex(1)
-            }
-            if isPresented {
-                let shape = RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+        Rectangle()
+            .fill(Palette.scrim)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+            .accessibilityHidden(true)
+    }
+}
+
+@MainActor
+enum ModalMetrics {
+    /// The command palette's container: `PanelContainer`'s radius around 14 pt cards.
+    static let cornerRadius: CGFloat = SettingsMetrics.cardRadius + PanelContainerMetrics.padding
+    /// Between the window content's edges and the card, so a tall card (the rebase rows) stays inside the window.
+    static let margin: CGFloat = 24
+}
+
+/// Every modal's card, decorated like the command palette (task 9.6): a `PanelContainer` (bg_card, radius 20, 1 pt
+/// edge) with the palette's shadow, holding cards of `Palette.surface` (radius 14). The header has the title and an
+/// optional subtitle (a confirmation's message) as plain text on the container, no card (user, 2026-11-13), padded
+/// like a card's content so it lines up with the cards' text; then the caller's cards (`ModalSection`, `SectionCard`), then the
+/// buttons at the bottom of the container. `takesFocus`: a card with no text field takes the focus on the next turn,
+/// so the keyboard (Escape, Return) reaches it and not the view behind.
+struct ModalCard<Content: View, Actions: View>: View {
+    let title: String
+    var subtitle: String?
+    var systemImage: String?
+    var width: CGFloat = 440
+    var takesFocus = false
+    @ViewBuilder let content: () -> Content
+    @ViewBuilder let actions: () -> Actions
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        PanelContainer(cornerRadius: ModalMetrics.cornerRadius) {
+            VStack(alignment: .leading, spacing: PanelContainerMetrics.padding) {
+                header
                 content()
-                    .frame(width: cardWidth)
-                    .frame(maxHeight: .infinity)
-                    // Clip before the card's background: dividers and scroll views stay inside the rounded corners,
-                    // the shadow is not cut.
-                    .clipShape(shape)
-                    .modifier(GlassCard(cornerRadius: Self.cornerRadius, raised: true))
-                    .onExitCommand(perform: dismiss)
-                    .padding(.vertical, Self.verticalMargin)
-                    .transition(cardTransition)
-                    .zIndex(2)
+                HStack(spacing: ModalFooterMetrics.spacing) {
+                    Spacer(minLength: 0)
+                    actions()
+                }
+                .environment(\.isModalFooter, true)
+                .padding(.trailing, ModalFooterMetrics.trailingPadding)
+                .padding(.vertical, ModalFooterMetrics.verticalPadding)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(width: width)
+        .shadow(color: Palette.cardShadow, radius: 16, y: 6)
+        .modifier(ModalCardFocus(enabled: takesFocus, focused: $focused))
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.settingsCaption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(SettingsMetrics.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// Focuses a `ModalCard` that has no text field on the next turn.
+private struct ModalCardFocus: ViewModifier {
+    let enabled: Bool
+    var focused: FocusState<Bool>.Binding
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .focusable()
+                .focusEffectDisabled()
+                .focused(focused)
+                // The card is installed on this turn; focus it on the next one.
+                .onAppear { DispatchQueue.main.async { focused.wrappedValue = true } }
+        } else {
+            content
+        }
+    }
+}
+
+/// One inner card of a `ModalCard`: the palette's results card (surface, radius 14, 1 pt edge), padded like a
+/// settings card.
+struct ModalSection<Content: View>: View {
+    var spacing: CGFloat = 12
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: spacing) {
+            content()
+        }
+        .padding(SettingsMetrics.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(GlassCard(cornerRadius: SettingsMetrics.cardRadius))
     }
 }

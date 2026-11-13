@@ -44,7 +44,7 @@ struct VerticalTabsPanel: View {
     }
 }
 
-/// The tabs as stacked pills, like the tab strip's: a press selects at once (on mouse-down), a drag past a few points
+/// The tabs as Settings sidebar rows (`VerticalTabRow`): a press selects at once (on mouse-down), a drag past a few points
 /// reorders.
 private struct VerticalTabList: View {
     let model: WindowModel
@@ -59,7 +59,7 @@ private struct VerticalTabList: View {
     @State private var dragFrom = 0
     @State private var dragTarget = 0
 
-    private var step: CGFloat { TabStripMetrics.tabHeight + TabStripMetrics.gap }
+    private var step: CGFloat { SidebarItemStyle.height + SidebarItemStyle.spacing }
     private var animation: Animation? { reduceMotion ? nil : Motion.standard }
 
     var body: some View {
@@ -78,18 +78,17 @@ private struct VerticalTabList: View {
     }
 
     private var rows: some View {
-        VStack(spacing: TabStripMetrics.gap) {
+        VStack(spacing: SidebarItemStyle.spacing) {
             ForEach(Array(model.tabs.enumerated()), id: \.element.id) { index, tab in
                 let dragged = tab.id == draggedID
                 // A tab not opened yet (filled in the background) has no session, so no dot.
                 let profile = model.sessions[tab.id]?.profile
-                TabItem(title: tab.title, help: tab.repoURL?.path ?? tab.title, profileColor: profile?.color,
-                        profileName: profile?.name, selected: tab.id == model.selectedTabID, dragged: dragged,
-                        namespace: namespace,
-                        onSelect: { model.selectTab(id: tab.id) },
-                        onClose: { close(tab.id) },
-                        titleAlignment: .leading)
-                    .frame(height: TabStripMetrics.tabHeight)
+                VerticalTabRow(title: tab.title, systemImage: Self.icon(of: tab), help: tab.repoURL?.path ?? tab.title,
+                               profileColor: profile?.color, profileName: profile?.name,
+                               selected: tab.id == model.selectedTabID, dragged: dragged, namespace: namespace,
+                               onSelect: { model.selectTab(id: tab.id) },
+                               onClose: { close(tab.id) })
+                    .frame(height: SidebarItemStyle.height)
                     .offset(y: offset(of: index, id: tab.id))
                     // Neighbors slide aside; the dragged tab tracks the pointer without lag.
                     .animation(draggedID != nil && !dragged ? animation : nil, value: dragTarget)
@@ -148,6 +147,12 @@ private struct VerticalTabList: View {
             }
     }
 
+    /// The toolbar's repo icon for a repo tab; a missing repo and a Welcome tab get their own.
+    private static func icon(of tab: WindowModel.Tab) -> String {
+        if tab.isMissing { return "questionmark.folder" }
+        return tab.repoURL == nil ? "plus.square.dashed" : "book.closed"
+    }
+
     /// A tab's close button; closing the last tab closes the window, like ⌘W.
     private func close(_ id: WindowModel.Tab.ID) {
         if !model.closeTab(id: id) { model.closeWindow() }
@@ -163,5 +168,85 @@ private struct VerticalTabsStatus: View {
         if let session = model.selectedSession {
             RunningStatus(session: session)
         }
+    }
+}
+
+/// One tab as a Settings sidebar row (`SidebarItemStyle`, user 2026-11-13): a 28 pt capsule, 10 pt padding, a 20 pt
+/// icon slot then the title (body font), the selected row in `Palette.selectedFill` with a `selectedBorder` edge and
+/// full-strength text (the pill slides between rows), the others secondary with a hover capsule. The profile's color is
+/// a dot on the icon's corner; the close button replaces the trailing slot on hover.
+private struct VerticalTabRow: View {
+    let title: String
+    let systemImage: String
+    let help: String
+    /// The profile's `#RRGGBB`; nil without a profile (no dot).
+    let profileColor: String?
+    let profileName: String?
+    let selected: Bool
+    let dragged: Bool
+    let namespace: Namespace.ID
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            icon
+            Text(title)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(selected ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if hovered && !dragged {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: TabStripMetrics.slot, height: TabStripMetrics.slot)
+                }
+                .buttonStyle(TabItem.CloseButtonStyle())
+                .help("Close Tab")
+                .accessibilityLabel("Close \(title)")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(maxHeight: .infinity)
+        .background {
+            if selected {
+                Capsule()
+                    .fill(Palette.selectedFill)
+                    .overlay(Capsule().strokeBorder(Palette.selectedBorder, lineWidth: 1))
+                    .matchedGeometryEffect(id: "selectedTab", in: namespace)
+            } else if hovered || dragged {
+                Capsule().fill(Palette.hoverFill)
+            }
+        }
+        .contentShape(Capsule())
+        .animation(Motion.hover, value: hovered)
+        .onHover { hovered = $0 }
+        .help(help)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+        .accessibilityValue(profileName.map { "Profile \($0)" } ?? "")
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction(.default, onSelect)
+    }
+
+    /// The tab's icon in the rows' 20 pt slot, with the profile's dot on its lower trailing corner, ringed in the
+    /// panel's color so it reads over the glyph.
+    private var icon: some View {
+        Image(systemName: systemImage)
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .frame(width: 20)
+            .overlay(alignment: .bottomTrailing) {
+                if let profileColor {
+                    Circle()
+                        .fill(ProfileColors.color(profileColor))
+                        .frame(width: TabStripMetrics.dot, height: TabStripMetrics.dot)
+                        .overlay(Circle().strokeBorder(Palette.bgCard, lineWidth: 1.5))
+                        .offset(x: 2, y: 2)
+                        .accessibilityHidden(true)
+                }
+            }
+            .accessibilityHidden(true)
     }
 }

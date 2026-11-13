@@ -1,11 +1,12 @@
 // The main window: the toolbar in the traffic-light row (`HeaderToolbar`), the tab strip under it (or the vertical
-// tabs, panel 0, left of the page), then the selected page, over the window glass.
+// tabs, panel 0, left of the page), then the selected page, over the window glass. Settings is a modal over it
+// (`ModalHost`).
 import AppKit
 import SwiftUI
 
-/// A page of the window, left to right in the slide order: the selected tab, Settings, About.
+/// A page of the window, left to right in the slide order: the selected tab, About.
 enum Page: String, CaseIterable, Hashable {
-    case home, settings, about
+    case home, about
 
     /// Its place in the order, for the slide direction.
     fileprivate var order: Int { Self.allCases.firstIndex(of: self) ?? 0 }
@@ -32,8 +33,7 @@ enum HeaderMetrics {
     static let tabRowPadding: CGFloat = 4
     /// Concentric with the tab pills: their radius (28 pt capsules), the strip's 1 pt row inset, then the padding.
     static let tabRowRadius: CGFloat = 14 + 1 + tabRowPadding
-    /// Between the tab strip and the top of every page (the repo panels, Welcome, Settings, About): the 8 pt gap of
-    /// the cards.
+    /// Between the tab strip and the top of every page (the repo panels, Welcome, About): the 8 pt gap of the cards.
     static let contentGap: CGFloat = SectionCardMetrics.spacing
 }
 
@@ -51,7 +51,7 @@ struct MainView: View {
         VStack(spacing: 0) {
             if !tabsOnLeft { tabRow }
             // The pages keep one place in the tree in both positions, so switching the position (from the Settings
-            // page itself) never rebuilds the page on screen.
+            // modal over it) never rebuilds the page on screen.
             HStack(spacing: 0) {
                 if tabsOnLeft {
                     // The pages' own leading inset is the gap after it.
@@ -62,8 +62,6 @@ struct MainView: View {
                 ZStack {
                     switch shownPage {
                     case .home: TabContent().transition(pageTransition)
-                    // The scaffold keeps one settings layout; both define `SettingsRoot`.
-                    case .settings: SettingsRoot().transition(pageTransition)
                     case .about: AboutPage().transition(pageTransition)
                     }
                 }
@@ -73,7 +71,9 @@ struct MainView: View {
             // Panel 0 and the page start at the top of the safe area, where the tab row does.
             .padding(.top, tabsOnLeft ? 0 : HeaderMetrics.contentGap)
         }
-        // Whoever switches the page (a tab, the Settings button, a menu), it slides the same way.
+        // Blurred and disabled behind a modal or the palette; its own view reads that, so this body never reruns.
+        .modifier(WindowBackdrop(model: model))
+        // Whoever switches the page (a tab, About, a menu), it slides the same way.
         .onChange(of: navigation.page, initial: true) { old, new in
             guard old != new else {
                 shownPage = new
@@ -96,6 +96,8 @@ struct MainView: View {
         }
         // ⌘K / the toolbar's Search: over the tabs and the page, under the toolbar.
         .overlay { CommandPaletteOverlay(model: model) }
+        // Settings, the forms, confirmations and rebase cards, drawn like the palette (same place in the window).
+        .overlay { ModalHost(model: model) }
         .modifier(HardTopScrollEdge())
     }
 
@@ -122,6 +124,16 @@ struct MainView: View {
         return .asymmetric(
             insertion: .offset(x: travel).combined(with: .opacity),
             removal: .offset(x: -travel).combined(with: .opacity).animation(Motion.exit))
+    }
+}
+
+/// Applies `ModalBackdrop` while the window shows Settings, a modal or the palette. Only this modifier reads that
+/// state.
+private struct WindowBackdrop: ViewModifier {
+    let model: WindowModel
+
+    func body(content: Content) -> some View {
+        content.modifier(ModalBackdrop(isActive: model.isShowingModal))
     }
 }
 

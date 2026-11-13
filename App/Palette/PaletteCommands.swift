@@ -1,4 +1,4 @@
-// The command palette's rows for one window, copied when it opens (task 8.5): the toolbar's repo actions and their
+// The command palette's rows for one window, copied when it opens (task 8.5): Undo / Redo, the toolbar's repo actions and their
 // Pull ▾ / Push ▾ menus, "Checkout <branch>" for every local and remote branch, the window's tabs, Open Repository…,
 // the Settings pages and the tab position, then the repo's menu operations (working tree, the selected commit, the
 // stashes, each branch, remote branch and tag, the remotes). Every repo row runs the same `MenuEntry` or
@@ -70,7 +70,7 @@ struct PaletteSnapshot {
 @MainActor
 enum PaletteCommands {
     /// The window's rows now. Repo rows only while a repo tab shows (`actionSession`, as the toolbar's buttons):
-    /// on Settings or About their confirmations and forms would have no presenter.
+    /// on About their confirmations and forms would have no presenter.
     static func snapshot(for model: WindowModel) -> PaletteSnapshot {
         var snapshot = PaletteSnapshot()
         let session = model.actionSession
@@ -84,8 +84,17 @@ enum PaletteCommands {
         return snapshot
     }
 
-    /// The toolbar's buttons (enabled as they are), then the Pull ▾ and Push ▾ menus.
+    /// Undo and Redo (named and enabled as the toolbar's), the toolbar's buttons (enabled as they are), then the Pull ▾
+    /// and Push ▾ menus.
     private static func repository(_ session: RepoSession, into snapshot: inout PaletteSnapshot) {
+        for isRedo in [false, true] {
+            let availability = session.historyAvailability(redo: isRedo)
+            snapshot.add(isRedo ? "Redo" : "Undo", detail: availability.toolTip, section: .repository,
+                         systemImage: isRedo ? "arrow.uturn.forward" : "arrow.uturn.backward",
+                         enabled: availability.isEnabled) {
+                if isRedo { session.redo() } else { session.undo() }
+            }
+        }
         for action in ToolbarAction.allCases {
             let isBusy = session.isRunning(action.key)
             snapshot.add(action.title, detail: action.help(session), section: .repository,

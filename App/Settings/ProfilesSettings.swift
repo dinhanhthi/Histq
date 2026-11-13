@@ -6,7 +6,8 @@ import SwiftUI
 struct ProfilesSettings: View {
     /// The profile the cards edit; nil (or a deleted one) shows the first.
     @Binding var profileID: UUID?
-    @State private var pendingDelete: Profile?
+    /// The window's modal (`ModalHost`) asks before a deletion.
+    @Environment(WindowModel.self) private var model
     @State private var importing = false
     @State private var importError: String?
 
@@ -24,16 +25,13 @@ struct ProfilesSettings: View {
             SettingsSkeletonGroup(rows: 2)
             SettingsSkeletonGroup(rows: 3)
         }
-        .confirmationDialog(
-            "Delete the profile \(pendingDelete?.name ?? "")?", isPresented: Binding(
-                get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
-            titleVisibility: .visible, presenting: pendingDelete
-        ) { profile in
-            Button("Delete Profile", role: .destructive) { library.delete(profile.id) }
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("Repos that used it switch to the default profile. Its SSH key files stay on disk.")
-        }
+    }
+
+    private func confirmDelete(_ profile: Profile) {
+        model.presentModal(.confirmation(ModalConfirmation(
+            title: "Delete the profile \(profile.name)?",
+            message: "Repos that used it switch to the default profile. Its SSH key files stay on disk.",
+            button: "Delete Profile", isDestructive: true) { library.delete(profile.id) }))
     }
 
     private var isLoading: Bool {
@@ -84,7 +82,7 @@ struct ProfilesSettings: View {
                 Button("Add") { select(library.addProfile()) }
                 Button("Duplicate") { current.map { select(library.duplicate($0.id)) } }
                     .disabled(current == nil)
-                Button("Delete…") { pendingDelete = current }
+                Button("Delete…") { current.map(confirmDelete) }
                     .disabled(current == nil)
                 Spacer(minLength: 12)
                 Button(importing ? "Reading…" : "Add from Global Git Config") { importGlobal(into: nil) }

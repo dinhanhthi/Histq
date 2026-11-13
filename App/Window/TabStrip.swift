@@ -4,7 +4,7 @@ import AppKit
 import SwiftUI
 
 /// Sizes of the tab strip. The tabs share one width, between `minTabWidth` and `maxTabWidth`; past that the row
-/// scrolls. The vertical tabs (`VerticalTabsPanel`) use the same tab height, gap and drag threshold.
+/// scrolls. The vertical tabs (`VerticalTabsPanel`) use the same drag threshold, slot and dot.
 enum TabStripMetrics {
     static let tabHeight: CGFloat = 28
     /// Between two tabs.
@@ -202,8 +202,6 @@ struct TabItem: View {
     let namespace: Namespace.ID
     let onSelect: () -> Void
     let onClose: () -> Void
-    /// The title's place in the space between the dot and the close button.
-    var titleAlignment: Alignment = .center
     @State private var hovered = false
 
     var body: some View {
@@ -223,7 +221,7 @@ struct TabItem: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .foregroundStyle(selected ? Color.primary : Color.secondary)
-                .frame(maxWidth: .infinity, alignment: titleAlignment)
+                .frame(maxWidth: .infinity)
             if hovered && !dragged {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -263,8 +261,8 @@ struct TabItem: View {
         .accessibilityAction(.default, onSelect)
     }
 
-    /// A small round highlight on hover, darker while pressed.
-    private struct CloseButtonStyle: ButtonStyle {
+    /// A small round highlight on hover, darker while pressed. The vertical tabs' rows use it too.
+    struct CloseButtonStyle: ButtonStyle {
         func makeBody(configuration: Configuration) -> some View {
             Highlight(configuration: configuration)
         }

@@ -1,7 +1,9 @@
 // The repo's context menus, built once as `MenuEntry` lists and shown both by the graph (an `NSMenu`) and by the sidebar
-// and the file list (SwiftUI): the commit menu (checkout, create branch / tag here, cherry-pick, revert, reset, copy),
+// and the file list (SwiftUI): the commit menu (checkout, create branch / tag here, cherry-pick, revert, reset,
+// interactive rebase from here, squash the selected commits, copy),
 // the WIP and stash menus, the branch, remote branch and tag menus, the Remote card's menus, the menu of a branch badge
-// dropped on another (merge, rebase, fast-forward), checkout file from a commit, and what a double-click checks out.
+// dropped on another (merge, rebase, fast-forward), the worktree menus (open in a tab, add, remove, prune), checkout
+// file from a commit, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
 import HistqCore
@@ -20,11 +22,14 @@ struct MenuEntry {
     var isEnabled = true
     var isDestructive = false
     var isChecked = false
+    /// Why a disabled item cannot run, shown on hover.
+    var toolTip: String?
 
     static func action(_ title: String, enabled: Bool = true, destructive: Bool = false, checked: Bool = false,
-                       _ perform: @escaping @MainActor () -> Void) -> MenuEntry
+                       toolTip: String? = nil, _ perform: @escaping @MainActor () -> Void) -> MenuEntry
     {
-        MenuEntry(title: title, kind: .action(perform), isEnabled: enabled, isDestructive: destructive, isChecked: checked)
+        MenuEntry(title: title, kind: .action(perform), isEnabled: enabled, isDestructive: destructive, isChecked: checked,
+                  toolTip: toolTip)
     }
 
     static func submenu(_ title: String, _ entries: [MenuEntry]) -> MenuEntry {
@@ -64,6 +69,7 @@ enum MenuBuilder {
                 let item = ActionMenuItem(title: entry.title, perform: perform)
                 item.isEnabled = entry.isEnabled
                 item.state = entry.isChecked ? .on : .off
+                item.toolTip = entry.toolTip
                 menu.addItem(item)
             case .submenu(let children):
                 let item = NSMenuItem(title: entry.title, action: nil, keyEquivalent: "")
@@ -110,6 +116,7 @@ struct MenuEntriesView: View {
                 } else {
                     Button(entry.title, role: entry.isDestructive ? .destructive : nil) { perform() }
                         .disabled(!entry.isEnabled)
+                        .help(entry.toolTip ?? "")
                 }
             case .submenu(let children):
                 Menu(entry.title) { AnyView(MenuEntriesView(entries: children)) }
@@ -131,6 +138,7 @@ enum RepoMenus {
         case .wip: wip(session)
         case .stash(let hash): stash(hash, session)
         case .commit(let hash): commit(hash, session)
+        case .worktree(let path): worktree(path, session)
         }
     }
 
@@ -183,6 +191,7 @@ enum RepoMenus {
             .separator,
             .action("Create Branch Here…") { session.dialog = .createBranch(from: hash, label: short) },
             .action("Create Tag Here…") { session.dialog = .createTag(at: hash, label: short) },
+            .action("Add Worktree Here…") { session.worktreeForm = WorktreeForm(source: .commit(hash), label: short) },
             .separator,
             .action(mainline == nil ? "Cherry-pick Commit" : "Cherry-pick Merge (parent 1)", enabled: !isHead) {
                 session.run(.cherryPick(hash, mainline: mainline), title: "Cherry-pick \(short)")
@@ -195,7 +204,19 @@ enum RepoMenus {
                     session.dialog = .reset(to: hash, label: short, branch: current, mode: mode)
                 }
             }),
+            .separator,
         ]
+        // The clicked row in a multi-selection: squash the selection; the rebase sheet shows the core's own refusal
+        // when the loaded log missed something.
+        let squash = session.squashSelection()
+        if squash.commits.count >= 2, squash.commits.contains(hash) {
+            entries.append(.action("Squash \(squash.commits.count) Commits…", enabled: squash.reason == nil,
+                                   toolTip: squash.reason) { session.openSquash(squash.commits) })
+        }
+        let rebaseReason = session.rebaseUnavailableReason(from: hash)
+        entries.append(.action("Interactive Rebase from Here…", enabled: rebaseReason == nil, toolTip: rebaseReason) {
+            session.openInteractiveRebase(from: hash)
+        })
         // The commit's refs, also those hidden behind the badge column's "+N".
         let refEntries = refItems(at: hash, refs: refs).map { item in
             MenuEntry.submenu(item.menuTitle, self.ref(item, session))
@@ -261,6 +282,9 @@ enum RepoMenus {
                                 title: "Set the upstream of \(name) to \(remote.name)")
                 }
             }),
+            .action("Add Worktree for \(name)…") {
+                session.worktreeForm = WorktreeForm(source: .branch(name), label: name)
+            },
             .separator,
             .action("Rename \(name)…") { session.dialog = .renameBranch(name) },
             .action("Delete \(name)…", enabled: !isCurrent, destructive: true) {
@@ -371,6 +395,70 @@ enum RepoMenus {
             .separator,
             .action("Copy URL") { copy(url) },
         ]
+    }
+
+    // MARK: Worktrees
+
+    /// A worktree's menu (its sidebar row, its graph row): open it in a tab, remove it (confirmed; never the main one or
+    /// this tab's own; losing its changes only through its own Force Remove item), prune, copy its path.
+    static func worktree(_ path: String, _ session: RepoSession) -> [MenuEntry] {
+        let info = session.worktrees.value?.first { $0.path == path }
+        let name = info?.name ?? URL(filePath: path).lastPathComponent
+        let canOpen = info.map { !$0.isCurrent && !$0.worktree.isPrunable } ?? false
+        let reason = info.flatMap(removeUnavailableReason)
+        var entries: [MenuEntry] = [
+            .action("Open in New Tab", enabled: canOpen) {
+                session.openWorktree(path)
+            },
+            .separator,
+            .action("Remove \(name)…", enabled: info != nil && reason == nil, destructive: true, toolTip: reason) {
+                let branch = info?.worktree.branch.map { " The branch \(RefBadge.shortBranch($0)) is kept." } ?? ""
+                session.confirm("Remove the worktree \(name)?",
+                                message: "Its folder \(ProfileLibrary.abbreviated(path)) is deleted.\(branch) Git "
+                                    + "refuses when it has uncommitted changes or untracked files.",
+                                button: "Remove Worktree", write: .removeWorktree(path, force: false),
+                                operation: "Remove worktree \(name)")
+            },
+        ]
+        if let info, info.isDirty, reason == nil {
+            entries.append(.action("Force Remove \(name)…", destructive: true) {
+                confirmForceRemove(path, name: name, changes: info.changes?.detail, session)
+            })
+        }
+        entries += [.separator] + worktrees(session).dropFirst()
+        entries += [.separator, .action("Copy Path") { copy(path) }]
+        return entries
+    }
+
+    /// The Worktrees card's menu: Add Worktree, Prune.
+    static func worktrees(_ session: RepoSession) -> [MenuEntry] {
+        let prunable = session.worktrees.value?.contains { $0.worktree.isPrunable } ?? false
+        return [
+            .action("Add Worktree…") { session.worktreeForm = WorktreeForm(source: nil, label: nil) },
+            .action("Prune Worktrees", enabled: prunable,
+                    toolTip: prunable ? nil : "No worktree's folder is missing: nothing to prune.") {
+                session.run(.pruneWorktrees, title: "Prune worktrees")
+            },
+        ]
+    }
+
+    /// Why a worktree cannot be removed from this tab; nil when it can.
+    private static func removeUnavailableReason(_ info: WorktreeInfo) -> String? {
+        if info.worktree.isMain { return "The main worktree cannot be removed." }
+        if info.isCurrent { return "This tab's own worktree: remove it from another worktree's tab." }
+        if info.worktree.isPrunable { return "Its folder is gone: Prune Worktrees removes its record." }
+        if info.worktree.isLocked { return "It is locked: unlock it with git worktree unlock first." }
+        return nil
+    }
+
+    /// The forced removal, which deletes the worktree's changes with its folder.
+    static func confirmForceRemove(_ path: String, name: String, changes: String?, _ session: RepoSession) {
+        let what = changes.map { "Its uncommitted changes (\($0)), its untracked files" } ?? "Its uncommitted changes"
+        session.confirm("Force remove the worktree \(name)?",
+                        message: "\(what) and its folder \(ProfileLibrary.abbreviated(path)) are deleted. This "
+                            + "cannot be undone.",
+                        button: "Force Remove", write: .removeWorktree(path, force: true),
+                        operation: "Force remove worktree \(name)")
     }
 
     // MARK: Drag and drop
@@ -531,15 +619,7 @@ enum RepoMenus {
     /// outcome goes to `operations.txt` in the state folder. For QA on fixture copies only.
     static func debugRun(_ spec: String, session: RepoSession) async {
         for step in spec.components(separatedBy: ";;") {
-            var titles = step.components(separatedBy: "|")
-            let root = titles.removeFirst()
-            var entries = debugMenu(root, session)
-            var found: MenuEntry?
-            for (index, title) in titles.enumerated() {
-                found = entries.first { $0.title == title }
-                if index < titles.count - 1, case .submenu(let children)? = found?.kind { entries = children }
-            }
-            guard let found, case .action(let perform) = found.kind, found.isEnabled else {
+            guard let perform = debugAction(step, session) else {
                 debugLog("missing \(step)")
                 continue
             }
@@ -556,6 +636,27 @@ enum RepoMenus {
         debugLog("done")
     }
 
+    /// DEBUG `-HistqShow "<menu>|<title>[|<title>…]"`: picks one menu item as `-HistqRun` does and runs it, but leaves
+    /// the confirmation or form it opens on screen (QA shots of the modals; `-HistqFormName` then submits a form).
+    static func debugShow(_ step: String, session: RepoSession) {
+        guard let perform = debugAction(step, session) else { return debugLog("missing \(step)") }
+        perform()
+    }
+
+    /// The enabled action at `<menu>|<title>[|<title>…]`, through its submenus.
+    private static func debugAction(_ step: String, _ session: RepoSession) -> (@MainActor () -> Void)? {
+        var titles = step.components(separatedBy: "|")
+        let root = titles.removeFirst()
+        var entries = debugMenu(root, session)
+        var found: MenuEntry?
+        for (index, title) in titles.enumerated() {
+            found = entries.first { $0.title == title }
+            if index < titles.count - 1, case .submenu(let children)? = found?.kind { entries = children }
+        }
+        guard let found, case .action(let perform) = found.kind, found.isEnabled else { return nil }
+        return perform
+    }
+
     private static func debugMenu(_ root: String, _ session: RepoSession) -> [MenuEntry] {
         let parts = root.split(separator: ":", maxSplits: 1).map(String.init)
         let value = parts.count > 1 ? parts[1] : ""
@@ -568,6 +669,11 @@ enum RepoMenus {
         case "tag": return ref(.tag(value), session)
         case "remotes": return remotes(session)
         case "branches": return branchPicker(session)
+        case "worktrees": return worktrees(session)
+        case "worktree":
+            // By folder name or path.
+            let info = session.worktrees.value?.first { $0.name == value || $0.path == value }
+            return worktree(info?.path ?? value, session)
         case "file":
             let file = value.split(separator: ":", maxSplits: 1).map(String.init)
             guard file.count == 2 else { return [] }
@@ -619,8 +725,15 @@ extension RefBadge {
         switch kind {
         case .branch(let isLocal, _, _): isLocal ? .local(name) : .remote(name)
         case .tag: .tag(name)
-        case .head: nil
+        case .head, .worktree: nil
         }
+    }
+}
+
+extension RefBadge {
+    /// `refs/heads/wt` → `wt`.
+    static func shortBranch(_ ref: String) -> String {
+        ref.hasPrefix("refs/heads/") ? String(ref.dropFirst("refs/heads/".count)) : ref
     }
 }
 

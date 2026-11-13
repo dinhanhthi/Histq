@@ -1,8 +1,8 @@
 // The window's toolbar, in the traffic-light row (house style, as EchoDiar and SegDown): at the leading edge the repo
 // menu (the window's repo tabs, recent repos, Open…), the branch menu (checks out the picked branch), as in GitKraken,
 // and the tab's profile chip (`ProfilePicker`); at the trailing edge capsules of Undo / Redo, Pull ▾ / Push ▾ / Fetch, Branch / Stash / Pop, then
-// Terminal / Search / Settings. The set of items never changes: on a Welcome tab, Settings or About the repo actions
-// are disabled, not removed.
+// Terminal / Search / Settings. The set of items never changes: on a Welcome tab or About the repo actions are
+// disabled, not removed. Settings is a modal over the tab (task 9.7), so the repo items stay as they are under it.
 //
 // An AppKit `NSToolbar`, not a SwiftUI `.toolbar`: a bridged SwiftUI toolbar takes part in every SwiftUI update pass of
 // the window (about 10 ms per tab select with these items, see docs/later), even when its items depend on nothing.
@@ -89,10 +89,12 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
         branchItem.visibilityPriority = .high
         profileItem.visibilityPriority = .high
 
-        // Phase 9 wires Undo and Redo to the operation journal; Phase 13 opens the repo in a terminal. Search opens
-        // the command palette.
-        configureButton(undoItem, label: "Undo", systemImage: "arrow.uturn.backward")
-        configureButton(redoItem, label: "Redo", systemImage: "arrow.uturn.forward")
+        // Undo and Redo move through the tab's operation journal (enabled and named from it in `apply`); Phase 13
+        // opens the repo in a terminal. Search opens the command palette.
+        configureButton(undoItem, label: "Undo", systemImage: Self.undoSymbol)
+        configureButton(redoItem, label: "Redo", systemImage: Self.redoSymbol)
+        undoItem.action = #selector(undo(_:))
+        redoItem.action = #selector(redo(_:))
         configureButton(terminalItem, label: "Terminal", systemImage: "terminal")
         configureButton(searchItem, label: "Search", systemImage: "magnifyingglass")
         for item in [undoItem, redoItem, terminalItem] { item.isEnabled = false }
@@ -183,8 +185,9 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     // MARK: State
 
     /// Applies the model to the items, then applies it again after the next change of what it read. Only the
-    /// selected tab's title, its session's refs, running operations, status, stashes, remotes and profile, the
-    /// profile store, and the page are read, so other tabs and the content's own state never wake the toolbar.
+    /// selected tab's title, its session's refs, running operations, status, stashes, remotes, profile, undo status
+    /// and operation in progress, the profile store, the page and the Settings modal are read, so other tabs and
+    /// the content's own state never wake the toolbar.
     private func observe() {
         withObservationTracking {
             apply()
@@ -208,7 +211,7 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             set(branchItem, toolTip: isBusy ? "Checking out…" : "Check out another branch")
         }
 
-        // Hidden, like the branch menu, where no repo tab shows (Welcome, Settings, About).
+        // Hidden, like the branch menu, where no repo tab shows (Welcome, About).
         set(profileItem, hidden: session == nil)
         if let session {
             let profile = session.profile
@@ -228,7 +231,19 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
             set(item, toolTip: isBusy ? "\(action.title): running…" : session.map(action.help) ?? action.title)
         }
 
-        let isSettings = model.navigation.page == .settings
+        for (item, isRedo) in [(undoItem, false), (redoItem, true)] {
+            let label = isRedo ? "Redo" : "Undo"
+            let availability = session?.historyAvailability(redo: isRedo) ?? (isEnabled: false, toolTip: label)
+            let isBusy = session?.isRunning(isRedo ? .redo : .undo) ?? false
+            set(item, enabled: availability.isEnabled)
+            set(item, toolTip: availability.toolTip)
+            set(item, systemImage: isBusy ? Self.busySymbol : isRedo ? Self.redoSymbol : Self.undoSymbol, label: label)
+        }
+        #if DEBUG
+        logUndoItem()
+        #endif
+
+        let isSettings = model.isSettingsOpen
         set(settingsItem, systemImage: isSettings ? "gearshape.fill" : "gearshape", label: "Settings")
     }
 
@@ -261,6 +276,22 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
 
     /// In place of a running action's icon (there is no spinner in a toolbar button without a custom view).
     private static let busySymbol = "progress.indicator"
+    private static let undoSymbol = "arrow.uturn.backward"
+    private static let redoSymbol = "arrow.uturn.forward"
+
+    #if DEBUG
+    private var loggedUndoItem: String?
+
+    /// DEBUG `-HistqLogUndo`: appends the Undo button's enabled state and tooltip to `operations.txt` each time they
+    /// change (a screenshot cannot show a tooltip).
+    private func logUndoItem() {
+        guard ProcessInfo.processInfo.arguments.contains("-HistqLogUndo") else { return }
+        let line = "toolbar undo enabled=\(undoItem.isEnabled) toolTip=\(undoItem.toolTip ?? "")"
+        guard line != loggedUndoItem else { return }
+        loggedUndoItem = line
+        RepoMenus.debugLog(line)
+    }
+    #endif
 
     private static func branchTitle(_ head: Head?) -> String {
         switch head {
@@ -284,6 +315,8 @@ final class HeaderToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate {
     @objc private func createBranch(_ sender: Any?) { perform(.branch) }
     @objc private func stash(_ sender: Any?) { perform(.stash) }
     @objc private func pop(_ sender: Any?) { perform(.pop) }
+    @objc private func undo(_ sender: Any?) { model.actionSession?.undo() }
+    @objc private func redo(_ sender: Any?) { model.actionSession?.redo() }
 
     private func selector(for action: ToolbarAction) -> Selector {
         switch action {

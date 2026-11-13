@@ -1,6 +1,7 @@
 // One tab's repository: its git runner, what it has read (status, refs, the log and its graph layout), the selected
 // detail with its loading state, and the watcher that keeps them current. Every git call runs off the main actor;
 // the main actor only publishes results.
+import CryptoKit
 import Foundation
 import HistqCore
 import os
@@ -72,6 +73,8 @@ struct LogSnapshot: Sendable {
     var synthetic: [GraphSyntheticRow] = []
     /// The stashes of the stash rows, newest first.
     var stashes: [Stash] = []
+    /// The other worktrees with changes whose WIP rows are laid out (after the WIP row, before the stashes).
+    var worktrees: [WorktreeInfo] = []
     /// Every page has been parsed and laid out; false while only the first pages are in.
     var isComplete = false
     /// The same for every snapshot of one load (its first page, then the whole log), new for each load: the graph
@@ -97,10 +100,77 @@ struct CommitDetail: Sendable {
     let isStash: Bool
 }
 
+/// A worktree of the repo as the sidebar card and the graph show it.
+struct WorktreeInfo: Hashable, Sendable {
+    let worktree: Worktree
+    /// The tab's own worktree: its changes are `RepoSession.status`, never read here.
+    let isCurrent: Bool
+    /// Another worktree's uncommitted changes; nil for the current one, a bare or missing one, or one whose status
+    /// could not be read.
+    let changes: WorktreeChanges?
+
+    var path: String { worktree.path }
+    /// The folder's name: the graph row's label and the sidebar row's title.
+    var name: String { URL(filePath: worktree.path).lastPathComponent }
+    /// Its branch (`wt`), or its short HEAD when detached.
+    var headLabel: String {
+        if let branch = worktree.branch { return RefBadge.shortBranch(branch) }
+        return worktree.head.map { String($0.prefix(7)) } ?? (worktree.isBare ? "bare" : "")
+    }
+    var isDirty: Bool { changes?.isEmpty == false }
+}
+
+/// A working tree's change counts: what the WIP row shows ("3 unstaged · 2 staged"; untracked and conflicted files
+/// count as unstaged).
+struct WorktreeChanges: Hashable, Sendable {
+    let unstaged: Int
+    let staged: Int
+
+    init(_ status: WorkingStatus) {
+        var unstaged = 0
+        var staged = 0
+        for entry in status.entries {
+            if entry.isStaged { staged += 1 }
+            if entry.isUnstaged || entry.kind == .untracked || entry.kind == .unmerged { unstaged += 1 }
+        }
+        self.unstaged = unstaged
+        self.staged = staged
+    }
+
+    var isEmpty: Bool { unstaged == 0 && staged == 0 }
+
+    var detail: String {
+        var parts: [String] = []
+        if unstaged > 0 { parts.append("\(unstaged) unstaged") }
+        if staged > 0 { parts.append("\(staged) staged") }
+        return parts.joined(separator: " · ")
+    }
+}
+
 /// A remote and its fetch URL.
 struct RemoteInfo: Hashable, Sendable {
     let name: String
     let url: String
+}
+
+/// The undo journal's next entries (their titles, `Commit "Fix login"`), or that the journal cannot be read.
+struct UndoStatus: Equatable, Sendable {
+    var undo: String?
+    var redo: String?
+    var isUnreadable = false
+
+    init() {}
+
+    /// Reads the journal file (off the main actor: file I/O).
+    nonisolated init(_ journal: UndoJournal) {
+        do {
+            let state = try journal.load()
+            undo = state.nextUndo?.title
+            redo = state.nextRedo?.title
+        } catch {
+            isUnreadable = true
+        }
+    }
 }
 
 /// A user operation in flight: what the action bar shows while it runs.
@@ -200,6 +270,12 @@ final class RepoSession: Identifiable {
         case renameRemote(String, to: String)
         case setRemoteURL(String, url: String)
 
+        /// A worktree at `path` (absolute, new) checking out `source`, or a new branch started there.
+        case addWorktree(path: String, source: GitOperations.WorktreeSource, newBranch: String?)
+        /// A linked worktree by its listed path; `force` loses its changes (only after the user chose that).
+        case removeWorktree(String, force: Bool)
+        case pruneWorktrees
+
         /// Merges `revision` into the current branch; `checkoutFirst` switches to that branch first.
         case merge(String, checkoutFirst: String?)
         /// Rebases the current branch onto `upstream`; `checkoutFirst` switches to that branch first.
@@ -234,6 +310,12 @@ final class RepoSession: Identifiable {
         case abortOperation(RepoState.Operation)
         case skipOperation(RepoState.Operation)
 
+        /// The undo journal's next entry taken back, or the last undone one replayed (Undo / Redo, ⌘Z / ⇧⌘Z).
+        case undo
+        case redo
+        /// An interactive rebase or a squash (the rebase sheet); its todo and message files go to the tab's rebase folder.
+        case interactiveRebase(RebaseTodo)
+
         /// The remote a network write talks to, for the host-key check of its failure.
         var remote: String? {
             switch self {
@@ -242,6 +324,19 @@ final class RepoSession: Identifiable {
                 remote
             default:
                 nil
+            }
+        }
+
+        /// What the journal cannot take back about this write (the greyed Undo's tooltip); nil for a local write.
+        var notUndoable: UndoJournal.NotUndoable? {
+            switch self {
+            case .push, .pushMirror: .push
+            case .fetchAll: .fetch
+            case .pull: .pull
+            case .deleteRemoteBranch: .deleteRemoteBranch
+            case .deleteRemoteTag: .deleteRemoteTag
+            case .pushTag: .pushTag
+            default: nil
             }
         }
     }
@@ -275,6 +370,14 @@ final class RepoSession: Identifiable {
     var localExpanded = true
     var remoteExpanded = true
     var tagsExpanded = true
+    var worktreesExpanded = true
+
+    /// The repo's worktrees (the main one first) with the other worktrees' change counts: read after the first log
+    /// page, so they never delay the tab's first content, then with every refs read and when the tab is shown again.
+    private(set) var worktrees: Loadable<[WorktreeInfo]> = .idle
+    /// Opens a folder in a tab of this tab's window, selecting the tab that already shows it (a worktree's "Open in
+    /// New Tab", a click on its graph row). Set by `WindowModel` when it makes the session.
+    @ObservationIgnored var openInTab: @MainActor (URL) -> Void = { _ in }
 
     /// The repo's remotes and their fetch URLs (`git remote -v`), read with the refs: a remote with no fetched branch
     /// shows too.
@@ -289,6 +392,39 @@ final class RepoSession: Identifiable {
     var confirmation: OperationConfirmation?
     /// The host-key sheet: the scan of the failure's host, then "Trust host".
     var hostKeyCheck: HostKeyCheck?
+    /// The interactive rebase or squash sheet (`InteractiveRebaseView`); it builds its todo once it shows.
+    var rebaseRequest: RebaseRequest?
+    /// The Add Worktree form (`AddWorktreeView`).
+    var worktreeForm: WorktreeForm?
+
+    /// A form, confirmation, host-key or rebase modal is open (`ModalHost` shows it over the window).
+    var hasModal: Bool {
+        dialog != nil || confirmation != nil || hostKeyCheck != nil || rebaseRequest != nil || worktreeForm != nil
+    }
+
+    /// Cancels every open modal, as their Cancel buttons do (a tab or page change).
+    func closeModals() {
+        dialog = nil
+        confirmation = nil
+        hostKeyCheck = nil
+        rebaseRequest = nil
+        worktreeForm = nil
+    }
+    /// The undo journal's next entries, read with the refs; the toolbar, the Edit menu and the palette show them.
+    private(set) var undoStatus = UndoStatus()
+    /// The last write when the journal cannot take it back (a push, a fetch): the greyed Undo says why. A later write
+    /// clears it.
+    private(set) var lastNotUndoable: UndoJournal.NotUndoable?
+    /// Interactive rebases being started: their files must stay while one runs (no rebase shows in `repoState` until
+    /// git has read the todo).
+    @ObservationIgnored private var rebaseStarts = 0
+    /// The tab's rebase folder may hold files of a rebase that has ended (or of one from before a relaunch): the next
+    /// state read without a rebase removes it.
+    @ObservationIgnored private var rebaseFilesMayExist = true
+    /// Bumped as an interactive rebase starts, before it writes its files. The folder's removal (off the main actor)
+    /// compares it with the value it saw at its check and removes under the same lock, so a Start clicked in between
+    /// never has its todo deleted.
+    @ObservationIgnored private let rebaseGeneration = OSAllocatedUnfairLock(initialState: 0)
     @ObservationIgnored private var nextOperationID = 0
 
     /// The tab's profile: the id the user picked or the repo resolved to; nil = none (git uses the user's own config).
@@ -315,6 +451,7 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var logGeneration = 0
     /// The stashes, read with the refs; nil until the first read. Compared with the log's to reload it when they change.
     @ObservationIgnored private var stashes: [Stash]?
+    @ObservationIgnored private var worktreeTask: Task<Void, Never>?
     @ObservationIgnored private let watcher = RepoWatcher()
     /// The auto-fetch timer while `PrefKey.autoFetchMinutes` is on; cancelled when the tab closes.
     @ObservationIgnored private var autoFetchTask: Task<Void, Never>?
@@ -351,6 +488,9 @@ final class RepoSession: Identifiable {
         let runner: GitRunner
         let base: [String: String]
         let directories: RepoDirectories
+        /// The worktree's undo journal and rebase folder under `StatePaths` (never in `.git`).
+        let journal: UndoJournal
+        let rebaseFolder: URL
 
         /// The read environment for this folder, built once per load: it lists the repo's filter and diff drivers
         /// first, so they can be disabled. Never with the tab's profile: a read needs no identity, signing or SSH key,
@@ -371,11 +511,23 @@ final class RepoSession: Identifiable {
         if let spec = AppState.launchFlag("-HistqRun") {
             Task { [weak self] in
                 for _ in 0..<100 {
-                    if self?.refs.value != nil, self?.log.value?.isComplete == true { break }
+                    // The worktree menus need the worktrees, read after the first log page.
+                    if self?.refs.value != nil, self?.log.value?.isComplete == true, self?.worktrees.value != nil { break }
                     try? await Task.sleep(for: .milliseconds(100))
                 }
                 guard let self else { return }
                 await RepoMenus.debugRun(spec, session: self)
+            }
+        }
+        // `-HistqShow`: one menu item whose confirmation or form stays open (QA shots of the modals).
+        if let step = AppState.launchFlag("-HistqShow") {
+            Task { [weak self] in
+                for _ in 0..<100 {
+                    if self?.refs.value != nil, self?.log.value?.isComplete == true, self?.worktrees.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                guard let self else { return }
+                RepoMenus.debugShow(step, session: self)
             }
         }
         // `-HistqCommit "<message>"`: commits the staged changes of a fixture copy through the WIP panel's write path
@@ -394,9 +546,22 @@ final class RepoSession: Identifiable {
                 } catch {
                     outcome = "fail commit: \(Self.writeMessage(for: error))"
                 }
-                let file = StatePaths.root.appending(path: "operations.txt", directoryHint: .notDirectory)
-                try? Data((outcome + "\n").utf8).write(to: file)
+                // Appended: the toolbar's `-HistqLogUndo` lines and the history seams share the file.
+                RepoMenus.debugLog(outcome)
             }
+        }
+        if let revision = AppState.launchFlag("-HistqOpenRebase") {
+            Task { [weak self] in await self?.runLaunchRebase([revision], squash: false) }
+        }
+        if let revisions = AppState.launchFlag("-HistqOpenSquash") {
+            Task { [weak self] in
+                await self?.runLaunchRebase(revisions.split(separator: ",").map(String.init), squash: true)
+            }
+        }
+        let undos = AppState.launchFlag("-HistqUndo").flatMap(Int.init) ?? 0
+        let redos = AppState.launchFlag("-HistqRedo").flatMap(Int.init) ?? 0
+        if undos + redos > 0 {
+            Task { [weak self] in await self?.runLaunchHistory(undos: undos, redos: redos) }
         }
         // `-HistqOperation`: the operation banner's buttons on a fixture copy, once the state is read.
         if let step = AppState.launchFlag("-HistqOperation") {
@@ -418,6 +583,7 @@ final class RepoSession: Identifiable {
         fileTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
+        worktreeTask?.cancel()
         setUpTask?.cancel()
         autoFetchTask?.cancel()
         profileTask?.cancel()
@@ -430,6 +596,7 @@ final class RepoSession: Identifiable {
         fileTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
+        worktreeTask?.cancel()
         setUpTask?.cancel()
         autoFetchTask?.cancel()
         autoFetchTask = nil
@@ -606,6 +773,8 @@ final class RepoSession: Identifiable {
     /// Selects graph rows: the path a click in the graph takes (and `-HistqSelect wip|commit:<sha>`, a parent
     /// jump). One row shows its detail, several a count; none keeps the detail as it is.
     func selectGraph(_ items: [GraphItem]) {
+        // Another worktree's row is never a selection: a click on it opens that worktree (`openWorktree`).
+        let items = items.filter { if case .worktree = $0 { false } else { true } }
         closeFile()
         graphSelection = items
         guard let first = items.first else { return }
@@ -617,6 +786,7 @@ final class RepoSession: Identifiable {
             case .wip: selection = .wip
             case .stash(let hash): selection = .stash(hash)
             case .commit(let hash): selection = .commit(hash)
+            case .worktree: return
             }
         }
         UITiming.select(timingDetail(selection))
@@ -810,6 +980,9 @@ final class RepoSession: Identifiable {
             try Task.checkCancellation()
             let refsMoved = try await readStatusAndRefs(backend, scope: scope)
             if scope.contains(.log) || refsMoved { loadLog(backend) }
+            // A worktree added or removed, or a commit made in one, shows as a refs change. Never before the first log
+            // page: that one starts the first read.
+            if scope.contains(.refs), log.value != nil { loadWorktrees(backend) }
             refreshTask = nil
             refreshScope = []
         } catch {
@@ -826,10 +999,12 @@ final class RepoSession: Identifiable {
     /// when cancelled, so nothing stale is published.
     private func readStatusAndRefs(_ backend: Backend, scope: RefreshScope) async throws -> Bool {
         guard scope.contains(.status) || scope.contains(.refs) else { return false }
-        let (newStatus, newState, newRefs, newStashes, newRemotes) = try await Self.read(
+        let (newStatus, newState, newRefs, newStashes, newRemotes, newUndo) = try await Self.read(
             backend, cwd: url, status: scope.contains(.status), refs: scope.contains(.refs))
         try Task.checkCancellation()
         if let newState, newState != repoState { repoState = newState }
+        if let newUndo, newUndo != undoStatus { undoStatus = newUndo }
+        if newState != nil { removeRebaseFilesIfDone() }
         if let newStatus {
             status = .loaded(newStatus)
             if let target = openFile, target.source == .wip {
@@ -856,21 +1031,26 @@ final class RepoSession: Identifiable {
 
     /// Whether the loaded log's WIP and stash rows no longer match the status and the stashes (the working tree
     /// became clean or dirty, HEAD moved, a stash was pushed or dropped): the graph is laid out again. False while a
-    /// log load runs; its completion checks again.
+    /// log load runs; its completion checks again. Other worktrees' rows count as the log has them: a change there is
+    /// `updateWorktreeRows`' (a new layout, no new `git log`).
     private var syntheticRowsChanged: Bool {
         guard logTask == nil, let log = log.value, log.isComplete, let status = status.value, let stashes else {
             return false
         }
-        return Self.syntheticRows(status: status, stashes: stashes) != log.synthetic
+        return Self.syntheticRows(status: status, stashes: stashes, worktrees: log.worktrees) != log.synthetic
     }
 
-    /// The rows above the commits: the WIP row when the working tree has changes (hanging from HEAD), then the stashes
-    /// (each hanging from the commit it was made on), newest first.
-    nonisolated static func syntheticRows(status: WorkingStatus, stashes: [Stash]) -> [GraphSyntheticRow] {
+    /// The rows above the commits: the WIP row when the working tree has changes (hanging from HEAD), then one per other
+    /// worktree with changes (hanging from its HEAD), then the stashes (each hanging from the commit it was made on),
+    /// newest first.
+    nonisolated static func syntheticRows(status: WorkingStatus, stashes: [Stash], worktrees: [WorktreeInfo])
+        -> [GraphSyntheticRow]
+    {
         var rows: [GraphSyntheticRow] = []
         if !status.entries.isEmpty {
             rows.append(GraphSyntheticRow(kind: .wip, id: "wip", base: status.branch.commit))
         }
+        rows += worktreeRows(worktrees)
         for stash in stashes {
             rows.append(GraphSyntheticRow(kind: .stash, id: stash.hash, base: stash.base))
         }
@@ -879,7 +1059,7 @@ final class RepoSession: Identifiable {
 
     @concurrent
     private nonisolated static func read(_ backend: Backend, cwd: URL, status: Bool, refs: Bool) async throws
-        -> (WorkingStatus?, RepoState?, Refs?, [Stash]?, [RemoteInfo]?)
+        -> (WorkingStatus?, RepoState?, Refs?, [Stash]?, [RemoteInfo]?, UndoStatus?)
     {
         let env = try await backend.readEnvironment(cwd: cwd)
         async let newStatus = status ? StatusReader.read(runner: backend.runner, cwd: cwd, env: env) : nil
@@ -891,7 +1071,12 @@ final class RepoSession: Identifiable {
         // The remotes live in the config, which the watcher does not follow: read with every refs read (each write
         // rereads the refs).
         async let newRemotes = refs ? readRemotes(backend, cwd: cwd, env: env) : nil
-        return (try await newStatus, await newState, try await newRefs, try await newStashes, try await newRemotes)
+        // Every journaled write moves a ref or comes with one (each write rereads the refs), so the journal is read
+        // with them.
+        let newUndo = refs ? UndoStatus(backend.journal) : nil
+        return (
+            try await newStatus, await newState, try await newRefs, try await newStashes, try await newRemotes, newUndo
+        )
     }
 
     /// `git remote -v`: each remote's fetch URL, in git's order.
@@ -920,11 +1105,18 @@ final class RepoSession: Identifiable {
         let cwd = url
         logGeneration &+= 1
         let generation = logGeneration
+        // The rows of the other worktrees as last read (none before the first read, which waits for this first page).
+        let worktrees = dirtyWorktrees
         logTask = Task { [weak self] in
             do {
-                let snapshot = try await Self.readLog(backend, cwd: cwd, generation: generation) { first in
+                let snapshot = try await Self.readLog(
+                    backend, cwd: cwd, generation: generation, worktrees: worktrees
+                ) { first in
                     guard isFirstLoad, !Task.isCancelled else { return }
-                    await MainActor.run { self?.log = .loaded(first) }
+                    await MainActor.run {
+                        self?.log = .loaded(first)
+                        self?.loadWorktrees(backend)
+                    }
                 }
                 try Task.checkCancellation()
                 guard let self else { return }
@@ -933,8 +1125,10 @@ final class RepoSession: Identifiable {
                 logTask = nil
                 UITiming.logComplete(commitCount: snapshot.commits.count)
                 if !isFirstLoad { dropVanishedSelection(previousLog: previous) }
-                // The status or the stashes changed while it loaded.
-                if syntheticRowsChanged { loadLog(backend) }
+                // A log without a page (an unborn branch) never started the worktrees' first read.
+                if case .idle = self.worktrees { loadWorktrees(backend) }
+                // The status or the stashes changed while it loaded, or the worktrees were read meanwhile.
+                if syntheticRowsChanged { loadLog(backend) } else { updateWorktreeRows(backend) }
             } catch {
                 guard !Self.isCancellation(error), let self else { return }
                 logTask = nil
@@ -952,7 +1146,8 @@ final class RepoSession: Identifiable {
     /// Throws `CancellationError` when cancelled (the stream itself ends without an error then).
     @concurrent
     private nonisolated static func readLog(
-        _ backend: Backend, cwd: URL, generation: Int, firstPage: @Sendable (LogSnapshot) async -> Void
+        _ backend: Backend, cwd: URL, generation: Int, worktrees: [WorktreeInfo],
+        firstPage: @Sendable (LogSnapshot) async -> Void
     ) async throws -> LogSnapshot {
         let env = try await backend.readEnvironment(cwd: cwd)
         let pages = LogReader.pages(runner: backend.runner, cwd: cwd, env: env)
@@ -961,7 +1156,8 @@ final class RepoSession: Identifiable {
         var layout = GraphLayout()
         var snapshot = LogSnapshot(generation: generation)
         snapshot.stashes = try await stashes
-        snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes)
+        snapshot.worktrees = worktrees
+        snapshot.synthetic = syntheticRows(status: try await status, stashes: snapshot.stashes, worktrees: worktrees)
         snapshot.syntheticRows = layout.append(snapshot.synthetic)
         var isFirst = true
         for try await page in pages {
@@ -975,6 +1171,191 @@ final class RepoSession: Identifiable {
         try Task.checkCancellation()
         snapshot.isComplete = true
         return snapshot
+    }
+
+    // MARK: Worktrees
+
+    /// The other worktrees whose changes get a graph row, in `git worktree list` order.
+    private var dirtyWorktrees: [WorktreeInfo] {
+        (worktrees.value ?? []).filter { !$0.isCurrent && $0.isDirty }
+    }
+
+    nonisolated static func worktreeRows(_ worktrees: [WorktreeInfo]) -> [GraphSyntheticRow] {
+        worktrees.map { GraphSyntheticRow(kind: .worktreeWIP, id: $0.path, base: $0.worktree.head) }
+    }
+
+    /// Rereads the worktrees when the tab is shown again: another worktree's files may have changed in its own tab (the
+    /// watcher only follows this worktree's). Nothing before the first log page, which starts the first read.
+    func refreshWorktrees() {
+        guard log.value != nil, worktreeTask == nil else { return }
+        Task { [weak self] in
+            guard let backend = try? await self?.backend() else { return }
+            self?.loadWorktrees(backend)
+        }
+    }
+
+    /// Reads the worktree list and the other worktrees' change counts off the main actor, then publishes them and lays
+    /// out their graph rows. A newer read cancels this one.
+    private func loadWorktrees(_ backend: Backend) {
+        worktreeTask?.cancel()
+        if worktrees.value == nil { worktrees = .loading }
+        let cwd = url
+        worktreeTask = Task { [weak self] in
+            do {
+                let list = try await Self.readWorktrees(backend, cwd: cwd)
+                try Task.checkCancellation()
+                guard let self else { return }
+                worktreeTask = nil
+                if worktrees.value != list { worktrees = .loaded(list) }
+                updateWorktreeRows(backend)
+            } catch {
+                guard !Self.isCancellation(error), let self else { return }
+                worktreeTask = nil
+                Self.logger.error("worktree read failed: \(error, privacy: .public)")
+                if worktrees.value == nil { worktrees = .failed(Self.message(for: error)) }
+            }
+        }
+    }
+
+    /// `git worktree list` here, then each other worktree's status in its own folder, with the read environment built
+    /// for that folder (its filter and diff drivers). A worktree whose status cannot be read gets no counts rather than
+    /// failing the list; bare and missing (prunable) ones are not read.
+    @concurrent
+    private nonisolated static func readWorktrees(_ backend: Backend, cwd: URL) async throws -> [WorktreeInfo] {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        let list = try await StashWorktreeReader.worktrees(runner: backend.runner, cwd: cwd, env: env)
+        let current = backend.directories.worktree.resolvingSymlinksInPath().path
+        var changes: [Int: WorktreeChanges] = [:]
+        try await withThrowingTaskGroup(of: (Int, WorktreeChanges?).self) { group in
+            for (index, worktree) in list.enumerated() {
+                let folder = URL(filePath: worktree.path, directoryHint: .isDirectory)
+                guard !worktree.isBare, !worktree.isPrunable, folder.resolvingSymlinksInPath().path != current
+                else { continue }
+                group.addTask {
+                    var isFolder: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isFolder), isFolder.boolValue,
+                          let env = try? await backend.readEnvironment(cwd: folder),
+                          let status = try? await StatusReader.read(runner: backend.runner, cwd: folder, env: env)
+                    else { return (index, nil) }
+                    return (index, WorktreeChanges(status))
+                }
+            }
+            for try await (index, change) in group { changes[index] = change }
+        }
+        try Task.checkCancellation()
+        return list.enumerated().map { index, worktree in
+            WorktreeInfo(
+                worktree: worktree,
+                isCurrent: URL(filePath: worktree.path).resolvingSymlinksInPath().path == current,
+                changes: changes[index])
+        }
+    }
+
+    /// Lays the graph out again when the other worktrees' rows no longer match the loaded log's: from the commits in
+    /// memory, off the main actor, as a new generation (the graph reloads, keeping its scroll). Waits for a log load in
+    /// flight; its completion calls this again.
+    private func updateWorktreeRows(_ backend: Backend) {
+        guard logTask == nil, let current = log.value, current.isComplete else { return }
+        let worktrees = dirtyWorktrees
+        guard worktrees != current.worktrees else { return }
+        logGeneration &+= 1
+        let generation = logGeneration
+        logTask = Task { [weak self] in
+            let snapshot = await Self.relayout(current, worktrees: worktrees, generation: generation)
+            guard !Task.isCancelled, let self else { return }
+            log = .loaded(snapshot)
+            logTask = nil
+            if syntheticRowsChanged { loadLog(backend) } else { updateWorktreeRows(backend) }
+        }
+    }
+
+    /// `log` with `worktrees`' rows in place of its own (after the WIP row, before the stashes), every row laid out again.
+    @concurrent
+    private nonisolated static func relayout(_ log: LogSnapshot, worktrees: [WorktreeInfo], generation: Int) async
+        -> LogSnapshot
+    {
+        var snapshot = log
+        snapshot.generation = generation
+        snapshot.worktrees = worktrees
+        snapshot.synthetic = log.synthetic.filter { $0.kind == .wip } + worktreeRows(worktrees)
+            + log.synthetic.filter { $0.kind == .stash }
+        var layout = GraphLayout()
+        snapshot.syntheticRows = layout.append(snapshot.synthetic)
+        snapshot.rows = layout.append(log.commits)
+        return snapshot
+    }
+
+    /// A problem of the Add Worktree form, worded for it.
+    struct FormProblem: Error {
+        let message: String
+    }
+
+    /// The Add Worktree form's write once its input checks out (off the main actor): a folder name without `/`, `.`
+    /// or control characters; an existing parent folder and no item at the new path; a revision that resolves to a
+    /// commit (passed on as its id); a valid new branch name.
+    func addWorktreeWrite(parent: String, name: String, start: WorktreeForm.Start, newBranch: String?) async
+        -> Result<Write, FormProblem>
+    {
+        guard let backend = try? await backend() else { return .failure(FormProblem(message: "The repository is not ready.")) }
+        return await Self.addWorktreeWrite(
+            parent: parent, name: name, start: start, newBranch: newBranch, backend: backend, cwd: url)
+    }
+
+    @concurrent
+    private nonisolated static func addWorktreeWrite(
+        parent: String, name: String, start: WorktreeForm.Start, newBranch: String?, backend: Backend, cwd: URL
+    ) async -> Result<Write, FormProblem> {
+        let hasControl = { (text: String) in
+            text.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+        }
+        guard !name.isEmpty, !name.contains("/"), name != ".", name != "..", !hasControl(name) else {
+            return .failure(FormProblem(message: "\"\(name)\" cannot be a folder name."))
+        }
+        guard let parent = ProfileLibrary.absolutePath(parent) else {
+            return .failure(FormProblem(message: "Choose the folder to create the worktree in."))
+        }
+        let path = (parent as NSString).appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: path) {
+            return .failure(FormProblem(message: "\(ProfileLibrary.abbreviated(path)) already exists."))
+        }
+        do {
+            try GitOperations.validateWorktreePath(path)
+        } catch {
+            return .failure(FormProblem(message: "\(ProfileLibrary.abbreviated(parent)) is not a folder."))
+        }
+        guard let env = try? await backend.readEnvironment(cwd: cwd) else {
+            return .failure(FormProblem(message: "The repository could not be read."))
+        }
+        if let newBranch {
+            let ops = GitOperations(runner: backend.runner, cwd: cwd, env: env)
+            do { try await ops.validateBranchName(newBranch) } catch {
+                return .failure(FormProblem(message: message(for: error)))
+            }
+        }
+        let source: GitOperations.WorktreeSource
+        switch start {
+        case .branch(let branch):
+            source = .branch(branch)
+        case .revision(let text):
+            let revision = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // `--end-of-options`: a revision typed as `-x` is a revision, never an option.
+            let result = hasControl(revision) ? nil : try? await backend.runner.run(
+                ["rev-parse", "--verify", "--quiet", "--end-of-options", revision + "^{commit}"], cwd: cwd, env: env,
+                allowedExitCodes: [0, 1])
+            let id = result?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard result?.exitCode == 0, GitOperations.isObjectID(id) else {
+                return .failure(FormProblem(message: "\(revision) is not a commit."))
+            }
+            source = .commit(id)
+        }
+        return .success(.addWorktree(path: path, source: source, newBranch: newBranch))
+    }
+
+    /// Opens another worktree of the repo in a tab of this window (its graph row, the sidebar's "Open in New Tab"): the
+    /// tab switches at once, its detail loading.
+    func openWorktree(_ path: String) {
+        UITiming.select("worktree \(URL(filePath: path).lastPathComponent)")
+        openInTab(URL(filePath: path, directoryHint: .isDirectory))
     }
 
     // MARK: File diff
@@ -1559,6 +1940,206 @@ final class RepoSession: Identifiable {
                 operation: "Checkout \(file.name) from \(short)", isDestructive: isChanged)
     }
 
+    // MARK: Undo, redo and rebase
+
+    /// Whether Undo (or Redo) can run now, and its tooltip: `Undo Commit "Fix login"`, else why not. The toolbar, the
+    /// Edit menu and the palette show the same.
+    func historyAvailability(redo: Bool) -> (isEnabled: Bool, toolTip: String) {
+        let verb = redo ? "Redo" : "Undo"
+        if isRunning(.undo) || isRunning(.redo) { return (false, "\(verb): running…") }
+        // The toolbar stays live above a modal: an undo there would change the state a confirmation or form describes.
+        if hasModal { return (false, "\(verb): close the open dialog first") }
+        if repoState?.isOperationInProgress == true { return (false, UndoError.operationInProgress.message) }
+        if undoStatus.isUnreadable { return (false, UndoError.unreadableJournal.message) }
+        if let title = redo ? undoStatus.redo : undoStatus.undo { return (true, "\(verb) \(title)") }
+        if !redo, let lastNotUndoable { return (false, lastNotUndoable.reason) }
+        return (false, redo ? "Nothing to redo" : "Nothing to undo")
+    }
+
+    /// Takes back the journal's next entry (⌘Z in the graph, the toolbar, the palette). A refusal (the repository
+    /// moved on, objects pruned) shows in the error banner with `UndoError.message`; nothing changed then. No
+    /// confirmation: an undo or a redo only moves between recorded states and can itself be taken back.
+    func undo() {
+        let availability = historyAvailability(redo: false)
+        guard availability.isEnabled else { return }
+        run(.undo, title: availability.toolTip, key: .undo)
+    }
+
+    func redo() {
+        let availability = historyAvailability(redo: true)
+        guard availability.isEnabled else { return }
+        run(.redo, title: availability.toolTip, key: .redo)
+    }
+
+    /// HEAD and its first parents down to the first merge (excluded), newest first, from the loaded log: the commits
+    /// an interactive rebase can start at or squash (`RebaseTodo` refuses merges in the range).
+    private func rebaseLine() -> (line: [String], pastMerge: Set<String>) {
+        guard let head = refs.value?.head.commit, let commits = log.value?.commits else { return ([], []) }
+        let byHash = Dictionary(commits.map { ($0.hash, $0) }, uniquingKeysWith: { first, _ in first })
+        var line: [String] = []
+        var pastMerge = Set<String>()
+        var next: String? = head
+        while let hash = next, let commit = byHash[hash] {
+            if commit.isMerge || !pastMerge.isEmpty { pastMerge.insert(hash) } else { line.append(hash) }
+            next = commit.parents.first
+        }
+        return (line, pastMerge)
+    }
+
+    /// Why "Interactive Rebase from Here" cannot start at `commit` (its menu item's tooltip); nil when it can.
+    func rebaseUnavailableReason(from commit: String) -> String? {
+        if repoState?.isOperationInProgress == true { return UndoError.operationInProgress.message }
+        let (line, pastMerge) = rebaseLine()
+        if line.contains(commit) { return nil }
+        if pastMerge.contains(commit) { return "A merge lies between this commit and HEAD; an interactive rebase would flatten it." }
+        return "This commit is not on the current branch."
+    }
+
+    /// The selected commits "Squash N Commits" would fold, oldest last as in the graph, with why it cannot when the
+    /// selection is not a run of commits on the current branch.
+    func squashSelection() -> (commits: [String], reason: String?) {
+        let selected = graphSelection.compactMap { item -> String? in
+            if case .commit(let hash) = item { hash } else { nil }
+        }
+        guard selected.count >= 2 else { return (selected, RebaseTodoError.selectionTooSmall.message) }
+        if repoState?.isOperationInProgress == true { return (selected, UndoError.operationInProgress.message) }
+        let line = rebaseLine().line
+        let positions = selected.compactMap { line.firstIndex(of: $0) }
+        guard positions.count == selected.count, let low = positions.min(), let high = positions.max(),
+              high - low + 1 == selected.count
+        else { return (selected, RebaseTodoError.nonContiguousSelection.message) }
+        return (selected, nil)
+    }
+
+    /// Opens the rebase sheet at once; it builds the todo off the main actor (`loadRebaseTodo`).
+    func openInteractiveRebase(from commit: String) {
+        rebaseRequest = RebaseRequest(kind: .fromCommit(commit))
+    }
+
+    func openSquash(_ commits: [String]) {
+        rebaseRequest = RebaseRequest(kind: .squash(commits))
+    }
+
+    /// The todo of a rebase sheet: the commits from `commit` to HEAD, or the squash of the selected commits. Read
+    /// environment, off the main actor; throws `RebaseTodoError` when the commits do not allow it.
+    func loadRebaseTodo(_ kind: RebaseRequest.Kind) async throws -> RebaseTodo {
+        let backend = try await backend()
+        return try await Self.buildTodo(kind, backend: backend, cwd: url)
+    }
+
+    @concurrent
+    private nonisolated static func buildTodo(_ kind: RebaseRequest.Kind, backend: Backend, cwd: URL) async throws
+        -> RebaseTodo
+    {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        switch kind {
+        case .fromCommit(let commit):
+            return try await RebaseTodo.fromCommit(commit, runner: backend.runner, cwd: cwd, env: env)
+        case .squash(let commits):
+            return try await RebaseTodo.squash(commits, runner: backend.runner, cwd: cwd, env: env)
+        }
+    }
+
+    /// The sheet's Start: runs the todo as a write; a conflict stops it and the operation banner takes over.
+    func startRebase(_ todo: RebaseTodo) {
+        run(.interactiveRebase(todo), title: todo.title)
+    }
+
+    /// Removes the tab's rebase folder once no rebase is in progress or starting: the `exec` lines of a stopped rebase
+    /// read their message files only on Continue, so the folder lives exactly as long as the rebase.
+    private func removeRebaseFilesIfDone() {
+        guard rebaseFilesMayExist, rebaseStarts == 0, let state = repoState, state.operation != .rebase else { return }
+        rebaseFilesMayExist = false
+        let generation = rebaseGeneration.withLock { $0 }
+        let lock = rebaseGeneration
+        Task { [weak self] in
+            guard let backend = try? await self?.backend() else { return }
+            await Self.removeFolder(backend.rebaseFolder, ifStill: generation, lock)
+        }
+    }
+
+    /// Removes the folder only while no rebase started since `generation` was read; the start bumps it under `lock`
+    /// before it writes, so the removal either ends first or does nothing.
+    @concurrent
+    private nonisolated static func removeFolder(
+        _ folder: URL, ifStill generation: Int, _ lock: OSAllocatedUnfairLock<Int>
+    ) async {
+        lock.withLock { current in
+            guard current == generation else { return }
+            try? FileManager.default.removeItem(at: folder)
+        }
+    }
+
+    #if DEBUG
+    /// DEBUG `-HistqOpenRebase <rev>` / `-HistqOpenSquash "<rev>,<rev>…"`: once the refs and the whole log are in,
+    /// resolves the revisions (`series~4`) and opens the sheet as the menu does (with `-HistqStartRebase`, runs it).
+    /// For QA on fixture copies only.
+    private func runLaunchRebase(_ revisions: [String], squash: Bool) async {
+        for _ in 0..<100 {
+            if refs.value != nil, log.value?.isComplete == true { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard let backend = try? await backend() else { return }
+        var commits: [String] = []
+        for revision in revisions {
+            guard let oid = try? await Self.resolveDebugRevision(revision, backend: backend, cwd: url) else {
+                RepoMenus.debugLog("fail open rebase: \(revision) is not a commit")
+                return
+            }
+            commits.append(oid)
+        }
+        if squash {
+            selectGraph(commits.map { .commit($0) })
+            openSquash(commits)
+        } else if let first = commits.first {
+            openInteractiveRebase(from: first)
+        }
+        // `-HistqStartRebase`: Start as the sheet would, with the todo as built (all picks; a squash with its default
+        // message), then the outcome goes to `operations.txt`.
+        guard ProcessInfo.processInfo.arguments.contains("-HistqStartRebase"), let kind = rebaseRequest?.kind else { return }
+        rebaseRequest = nil
+        do {
+            startRebase(try await loadRebaseTodo(kind))
+            while !running.isEmpty { try? await Task.sleep(for: .milliseconds(50)) }
+            RepoMenus.debugLog(failure.map { "fail rebase: \($0.message)" } ?? "ok rebase")
+        } catch {
+            RepoMenus.debugLog("fail rebase todo: \(Self.writeMessage(for: error))")
+        }
+    }
+
+    @concurrent
+    private nonisolated static func resolveDebugRevision(_ revision: String, backend: Backend, cwd: URL) async throws
+        -> String
+    {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        return try await backend.runner.run(
+            ["rev-parse", "--verify", "--end-of-options", revision + "^{commit}"], cwd: cwd, env: env
+        ).text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// DEBUG `-HistqUndo N` / `-HistqRedo N`: once the status and the journal are read, N undos (then N redos), one
+    /// after the other through the toolbar's path; each outcome is appended to `operations.txt`.
+    private func runLaunchHistory(undos: Int, redos: Int) async {
+        for _ in 0..<100 {
+            if status.value != nil, refs.value != nil { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        for redo in Array(repeating: false, count: undos) + Array(repeating: true, count: redos) {
+            let availability = historyAvailability(redo: redo)
+            let verb = redo ? "redo" : "undo"
+            guard availability.isEnabled else {
+                RepoMenus.debugLog("fail \(verb): disabled (\(availability.toolTip))")
+                continue
+            }
+            if redo { self.redo() } else { undo() }
+            while !running.isEmpty { try? await Task.sleep(for: .milliseconds(50)) }
+            RepoMenus.debugLog(failure.map { "fail \(verb): \($0.message)" } ?? "ok \(availability.toolTip)")
+            failure = nil
+        }
+        RepoMenus.debugLog("done history")
+    }
+    #endif
+
     // MARK: Commit detail
 
     /// One commit's message, people, dates and parents (`git log -1`), then its files against its first parent
@@ -1644,12 +2225,27 @@ final class RepoSession: Identifiable {
         let backend = try await backend()
         // The profile as it is when the write starts; its environment is built off the main actor in `run`.
         let profile = await writeProfile()
+        let isRebase = if case .interactiveRebase = write { true } else { false }
+        if isRebase {
+            rebaseStarts += 1
+            rebaseFilesMayExist = true
+            rebaseGeneration.withLock { $0 += 1 }
+        }
+        defer {
+            if isRebase {
+                rebaseStarts -= 1
+                // The read after the write skipped the folder while the start counted: a rebase that completed (or
+                // failed before it began) leaves it now.
+                removeRebaseFilesIfDone()
+            }
+        }
         do {
             try await Self.run(write, profile: profile, backend: backend, cwd: url)
         } catch {
             await refreshAfterWrite()
             throw error
         }
+        if lastNotUndoable != write.notUndoable { lastNotUndoable = write.notUndoable }
         await refreshAfterWrite()
     }
 
@@ -1663,7 +2259,7 @@ final class RepoSession: Identifiable {
         let base = await GitToolchain.writeBase()
         // The tab's identity, signing and SSH key, as command-scope config: `.git/config` is never edited.
         let environment = GitInvocation.environment(profile: profile, base: base)
-        let ops = GitOperations(runner: backend.runner, cwd: cwd, env: environment)
+        let ops = GitOperations(runner: backend.runner, cwd: cwd, env: environment, journal: backend.journal)
         switch write {
         case .stage(let paths): try await ops.stage(paths)
         case .stageAll: try await ops.stageAll()
@@ -1705,6 +2301,11 @@ final class RepoSession: Identifiable {
         case .renameRemote(let name, let newName): try await ops.renameRemote(name, to: newName)
         case .setRemoteURL(let name, let url): try await ops.setRemoteURL(name, url: url)
 
+        case .addWorktree(let path, let source, let newBranch):
+            try await ops.addWorktree(at: path, from: source, newBranch: newBranch)
+        case .removeWorktree(let path, let force): try await ops.removeWorktree(path, force: force)
+        case .pruneWorktrees: try await ops.pruneWorktrees()
+
         case .merge(let revision, let checkoutFirst):
             if let checkoutFirst { try await ops.checkout(branch: checkoutFirst) }
             try await ops.merge(revision)
@@ -1737,6 +2338,19 @@ final class RepoSession: Identifiable {
         case .continueOperation(let operation): try await ops.continueOperation(operation)
         case .abortOperation(let operation): try await ops.abortOperation(operation)
         case .skipOperation(let operation): try await ops.skipOperation(operation)
+
+        case .undo: try await ops.undo()
+        case .redo: try await ops.redo()
+        case .interactiveRebase(let todo):
+            // The folder may hold the files of a rebase still stopped at a conflict: never replace them then.
+            let env = try await backend.readEnvironment(cwd: cwd)
+            if try await RepoState.read(runner: backend.runner, cwd: cwd, env: env).isOperationInProgress {
+                throw UndoError.operationInProgress
+            }
+            let folder = backend.rebaseFolder
+            if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.removeItem(at: folder) }
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try await ops.interactiveRebase(todo, files: folder)
         }
     }
 
@@ -1925,7 +2539,12 @@ final class RepoSession: Identifiable {
                     profile: nil, base: toolchain.readBase, runner: runner, cwd: cwd)
                 let directories = try await RepoDirectories.resolve(runner: runner, cwd: cwd, env: env)
                 watcher.start(directories, onChange: onChange)
-                return Backend(runner: runner, base: toolchain.readBase, directories: directories)
+                let key = RepoSession.stateKey(cwd)
+                return Backend(
+                    runner: runner, base: toolchain.readBase, directories: directories,
+                    journal: UndoJournal(file: StatePaths.directory("undo").appending(
+                        path: "\(key).json", directoryHint: .notDirectory)),
+                    rebaseFolder: StatePaths.root.appending(path: "rebase/\(key)", directoryHint: .isDirectory))
             }
         }
         guard let setUpTask else { throw CancellationError() }
@@ -1937,6 +2556,12 @@ final class RepoSession: Identifiable {
             if !Self.isCancellation(error), self.setUpTask == setUpTask { self.setUpTask = nil }
             throw error
         }
+    }
+
+    /// A file name for the worktree's state: the SHA-256 of its real path (`ProfileStore.repoKey`), so each worktree
+    /// of a repo has its own journal and no path character reaches a file name.
+    private nonisolated static func stateKey(_ cwd: URL) -> String {
+        SHA256.hash(data: Data(ProfileStore.repoKey(cwd).utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: Errors
@@ -1956,6 +2581,10 @@ final class RepoSession: Identifiable {
             "This file's contents are not downloaded yet (a partial clone): fetch to see them."
         case ConflictSourceError.notConflicted:
             "This file has no conflict left."
+        case let error as UndoError:
+            error.message
+        case let error as RebaseTodoError:
+            error.message
         case let error as GitOperationError:
             switch error {
             case .invalidBranchName(let name): "\"\(name)\" is not a valid branch name."
@@ -1968,6 +2597,11 @@ final class RepoSession: Identifiable {
             case .invalidMainline(let parent): "A merge has no parent \(parent)."
             case .noOperationInProgress: "No merge, rebase, cherry-pick or revert is in progress."
             case .unsupported(let what): "Not supported: \(what)."
+            case .invalidWorktreePath(let path):
+                "\(path) cannot be a new worktree: its parent folder must exist and it must not."
+            case .notAWorktree(let path): "\(path) is not a worktree of this repository."
+            case .mainWorktree: "The main worktree cannot be removed."
+            case .currentWorktree: "This tab's own worktree cannot be removed from here."
             }
         case GitInvocation.BackgroundFetchError.repoSetsNetworkConfig(let keys):
             "The repo sets its own http or proxy config (\(keys.joined(separator: ", "))); "

@@ -96,7 +96,6 @@ struct RepoLayoutView: View {
             }
             .padding([.horizontal, .bottom], RepoLayoutMetrics.inset)
         }
-        .operationDialogs(session: session)
     }
 
     /// The three panels and their dividers.
@@ -213,7 +212,10 @@ private struct CommitListPanel: View {
                               dropEntries: { [session] source, target in
                                   guard let source = source.sidebarItem, let target = target.sidebarItem else { return [] }
                                   return RepoMenus.drop(source, onto: target, session)
-                              })
+                              },
+                              canUndo: { [session] redo in session.historyAvailability(redo: redo).isEnabled },
+                              onUndo: { [session] redo in if redo { session.redo() } else { session.undo() } },
+                              onOpenWorktree: { [session] path in session.openWorktree(path) })
                         .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
                 case .failed(let message):
                     Label(message, systemImage: "exclamationmark.triangle")

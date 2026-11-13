@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Launches the Debug Histq app in an isolated state dir and captures its window only.
+# Launches the Debug Histq app in an isolated state dir and captures its window only. The launch stays in the
+# background: `open -g` (no activation) and `-HistqBackground YES` (the app never activates, its window is ordered
+# behind the others and never made key, on the "ARZOPA" display when connected), so a run never takes the user's
+# focus. `screencapture -l` captures the window even when other windows cover it; inactive-window rendering (grey
+# traffic lights) is expected.
 #
 # Usage: scripts/shot.sh <out.png> [--keep-state] [--wait <s>] [repo paths…] [-- app args…]
 #
@@ -41,7 +45,7 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do
   shift
 done
 [ $# -gt 0 ] && shift  # drop `--`
-open_args+=(--args -HistqStateDir "$STATE_DIR")
+open_args+=(--args -HistqStateDir "$STATE_DIR" -HistqBackground YES)
 [ $# -gt 0 ] && open_args+=("$@")
 
 APP="$(cd "$ROOT" && xcodebuild -project Histq.xcodeproj -scheme Histq -configuration Debug -showBuildSettings 2>/dev/null \
@@ -88,7 +92,7 @@ xcrun swiftc -O -o "$tmpdir/winid" "$tmpdir/winid.swift" 2>"$tmpdir/swiftc.log" 
   || die "could not compile the window-id helper: $(cat "$tmpdir/swiftc.log")"
 
 before="$(bin_pids | sort)"
-open -n -a "$APP" "${open_args[@]}" || die "open failed for $APP"
+open -n -g -a "$APP" "${open_args[@]}" || die "open failed for $APP"
 
 # Up to 10 s for the new instance and its window.
 winid=""

@@ -1,8 +1,9 @@
-// A repo tab's sidebar (panel 1): tabs Branches (Local and Remote cards, ahead/behind counts), Tags, and Pull
-// requests & Issues (a hint until GitHub is connected, Phase 11). Each section is its own collapsible card. A click
+// A repo tab's sidebar (panel 1): tabs Branches (Local, Remote and Worktrees cards, ahead/behind counts), Tags, and
+// Pull requests & Issues (a hint until GitHub is connected, Phase 11). Each section is its own collapsible card. A click
 // selects a row at once and the graph jumps to its commit; a double-click checks it out (the single click never waits
 // for it); a right-click opens the same menu as its badge in the graph. The Remote card's header menu adds a remote and
-// renames, removes, re-points or mirrors one.
+// renames, removes, re-points or mirrors one. The Worktrees card lists the repo's worktrees (branch or HEAD, a pencil
+// when one has uncommitted changes); a double-click opens another one in a tab, its header menu adds or prunes.
 import HistqCore
 import SwiftUI
 
@@ -81,6 +82,8 @@ private enum SidebarMetrics {
     static let localImage = "laptopcomputer"
     static let remoteImage = "cloud"
     static let branchImage = "arrow.triangle.branch"
+    /// The Worktrees card and each worktree's row: a folder, as GitKraken draws them.
+    static let worktreeImage = "folder"
 }
 
 /// The sidebar of a repo tab: the tab picker across its width (icon and short name; the full name is the tooltip),
@@ -132,6 +135,10 @@ struct SidebarView: View {
             SidebarSection(title: "Remote", systemImage: SidebarMetrics.remoteImage, count: nil,
                            isExpanded: $session.remoteExpanded) {
                 SkeletonRows(fractions: [0.3, 0.55, 0.4])
+            }
+            SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: nil,
+                           isExpanded: $session.worktreesExpanded) {
+                SkeletonRows(fractions: [0.4, 0.55])
             }
         case (.tags, .idle), (.tags, .loading):
             SidebarSection(title: "Tags", systemImage: "tag", count: nil, isExpanded: $session.tagsExpanded) {
@@ -193,6 +200,7 @@ private struct BranchSections: View {
             .help("Remotes")
             .accessibilityLabel("Remote actions")
         }
+        WorktreeSection(session: session)
     }
 
     /// Remote branches by remote: the remotes in git's order (also those with no fetched branch), then any other remote
@@ -205,6 +213,116 @@ private struct BranchSections: View {
             groups[branch.remote, default: []].append(branch)
         }
         return order.map { ($0, groups[$0] ?? []) }
+    }
+}
+
+/// The Worktrees card: its rows once the worktrees are read (after the graph's first page, so skeleton rows until
+/// then), and the header's menu (Add Worktree, Prune).
+private struct WorktreeSection: View {
+    @Bindable var session: RepoSession
+
+    var body: some View {
+        SidebarSection(title: "Worktrees", systemImage: SidebarMetrics.worktreeImage, count: count,
+                       isExpanded: $session.worktreesExpanded) {
+            switch session.worktrees {
+            case .idle, .loading:
+                SkeletonRows(fractions: [0.4, 0.55])
+            case .loaded(let worktrees):
+                ForEach(worktrees, id: \.path) { info in
+                    WorktreeRow(session: session, info: info)
+                }
+            case .failed(let message):
+                EmptyRow(text: message)
+            }
+        } accessory: {
+            Menu {
+                MenuEntriesView(entries: RepoMenus.worktrees(session))
+            } label: {
+                Image(systemName: "ellipsis")
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.button)
+            .buttonStyle(RowIconButtonStyle())
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Worktrees")
+            .accessibilityLabel("Worktree actions")
+        }
+    }
+
+    /// Nil (a loading count) only while the worktrees load; a failed read shows its message, not a spinner.
+    private var count: Int? {
+        if case .failed = session.worktrees { return 0 }
+        return session.worktrees.value?.count
+    }
+}
+
+/// A worktree's row: a check for this tab's own (as the checked-out branch), a folder for the others; its folder name,
+/// a pencil when it has uncommitted changes, then its branch or short HEAD. A click jumps the graph to its HEAD commit
+/// at once; a double-click opens another worktree in a tab, recognized beside the single click
+/// (`simultaneousGesture`). Its context menu opens, removes or prunes.
+private struct WorktreeRow: View {
+    let session: RepoSession
+    let info: WorktreeInfo
+    @State private var hovered = false
+
+    var body: some View {
+        HStack(spacing: SidebarMetrics.iconGap) {
+            Image(systemName: info.isCurrent ? "checkmark" : SidebarMetrics.worktreeImage)
+                .frame(width: SidebarMetrics.iconSlot, alignment: .leading)
+            HStack(spacing: 4) {
+                Text(info.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                if let changes {
+                    Image(systemName: "pencil")
+                        .foregroundStyle(Color(nsColor: Palette.graphLanes[0]))
+                        .help("Uncommitted changes: \(changes)")
+                }
+                Text(info.worktree.isPrunable ? "missing" : info.headLabel)
+                    .font(.settingsCaption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.leading, SidebarMetrics.rowLeading)
+        .padding(.trailing, 10)
+        .frame(minHeight: SidebarItemStyle.height)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Capsule().fill(hovered ? Palette.hoverFill : .clear))
+        .contentShape(Capsule())
+        .animation(Motion.hover, value: hovered)
+        .onHover { hovered = $0 }
+        .onTapGesture { showHead() }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { open() })
+        .contextMenu { MenuEntriesView(entries: RepoMenus.worktree(info.path, session)) }
+        .help(info.path)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Worktree \(info.name), \(info.headLabel)\(changes == nil ? "" : ", uncommitted changes")")
+        .accessibilityAction { showHead() }
+        .accessibilityAction(named: "Open in New Tab") { open() }
+    }
+
+    /// This tab's own changes come from its status, another worktree's from its own read.
+    private var changes: String? {
+        if info.isCurrent {
+            guard let status = session.status.value, !status.entries.isEmpty else { return nil }
+            return WorktreeChanges(status).detail
+        }
+        return info.isDirty ? info.changes?.detail : nil
+    }
+
+    private func showHead() {
+        guard let head = info.worktree.head else { return }
+        session.selectGraph([.commit(head)])
+    }
+
+    private func open() {
+        guard !info.isCurrent, !info.worktree.isPrunable else { return }
+        session.openWorktree(info.path)
     }
 }
 

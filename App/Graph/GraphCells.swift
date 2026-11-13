@@ -15,6 +15,8 @@ struct RefBadge: Hashable {
         case tag
         /// A detached HEAD.
         case head
+        /// Another worktree's WIP row: the worktree's folder name.
+        case worktree
     }
 
     let kind: Kind
@@ -121,6 +123,7 @@ final class RefBadgeCellView: NSView {
             return (isHead ? ["checkmark"] : [], (isLocal ? ["laptopcomputer"] : []) + (isRemote ? ["cloud"] : []))
         case .tag: return (["tag"], [])
         case .head: return (["checkmark"], [])
+        case .worktree: return (["folder"], [])
         }
     }
 

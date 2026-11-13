@@ -1,5 +1,6 @@
 // The commit graph: an NSTableView with gk's columns (BRANCH / TAG, GRAPH, COMMIT MESSAGE, AUTHOR, COMMIT DATE / TIME).
-// Rows: the WIP row (when the working tree has changes), the stash rows, then the commits, laid out by `GraphLayout`.
+// Rows: the WIP row (when the working tree has changes), a WIP row per other worktree with changes (labeled with its
+// folder's name; a click opens it in a tab), the stash rows, then the commits, laid out by `GraphLayout`.
 // The table only asks for the rows on screen, so its cost does not grow with the log: a later page of the same load is
 // inserted as rows, a new load reloads. A click selects at once (`action`); a double-click calls the checkout hook
 // (`doubleAction`) without delaying the single click.
@@ -13,6 +14,8 @@ enum GraphItem: Hashable, Sendable {
     /// A stash, by its commit hash.
     case stash(String)
     case commit(String)
+    /// Another worktree's WIP row, by the worktree's path. Never a selection: a click opens the worktree in a tab.
+    case worktree(String)
 }
 
 /// The graph's columns, in gk's order. Widths are resizable and saved in `PrefKey.graphColumnWidths`; the message
@@ -70,7 +73,8 @@ enum GraphColumn: String, CaseIterable {
 /// `rowDensity` are `PrefKey.dateFormat` and `PrefKey.rowDensity`. `onSelect` gets the selected rows (in row order) as
 /// soon as the selection changes (a click, ⌘/⇧-click, the arrow keys); `onActivate` gets a double-clicked row.
 /// `selection` is the selection the table follows: a new one (a parent jump) is selected and scrolled to, without an
-/// `onSelect` echo.
+/// `onSelect` echo. ⌘Z / ⇧⌘Z while the table has the focus ask `canUndo` and run `onUndo` (`redo` true for Redo);
+/// a text field keeps its own undo, since its field editor answers first.
 struct GraphView: NSViewRepresentable {
     let log: LogSnapshot
     let refs: Refs?
@@ -84,6 +88,10 @@ struct GraphView: NSViewRepresentable {
     var menuEntries: @MainActor (GraphItem, RefBadge?) -> [MenuEntry] = { _, _ in [] }
     /// The menu of a branch badge dropped on another (source, target).
     var dropEntries: @MainActor (RefBadge, RefBadge) -> [MenuEntry] = { _, _ in [] }
+    var canUndo: @MainActor (_ redo: Bool) -> Bool = { _ in false }
+    var onUndo: @MainActor (_ redo: Bool) -> Void = { _ in }
+    /// A click on another worktree's WIP row, with its path (arrow keys passing over the row do not call it).
+    var onOpenWorktree: @MainActor (String) -> Void = { _ in }
 
     func makeCoordinator() -> GraphTableController { GraphTableController() }
 
@@ -146,6 +154,24 @@ final class GraphTableView: NSTableView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         (delegate as? GraphTableController)?.menu(at: convert(event.locationInWindow, from: nil))
+    }
+
+    // Edit › Undo / Redo (⌘Z / ⇧⌘Z) reach the table only while it is the first responder.
+
+    @objc func undo(_ sender: Any?) {
+        (delegate as? GraphTableController)?.history(redo: false)
+    }
+
+    @objc func redo(_ sender: Any?) {
+        (delegate as? GraphTableController)?.history(redo: true)
+    }
+
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(undo(_:)): (delegate as? GraphTableController)?.canHistory(redo: false) ?? false
+        case #selector(redo(_:)): (delegate as? GraphTableController)?.canHistory(redo: true) ?? false
+        default: super.validateUserInterfaceItem(item)
+        }
     }
 
     override func tile() {
@@ -303,16 +329,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// "3 unstaged · 2 staged": the WIP row's counts (untracked and conflicted files count as unstaged).
     private static func wipDetail(_ status: WorkingStatus) -> String {
-        var unstaged = 0
-        var staged = 0
-        for entry in status.entries {
-            if entry.isStaged { staged += 1 }
-            if entry.isUnstaged || entry.kind == .untracked || entry.kind == .unmerged { unstaged += 1 }
-        }
-        var parts: [String] = []
-        if unstaged > 0 { parts.append("\(unstaged) unstaged") }
-        if staged > 0 { parts.append("\(staged) staged") }
-        return parts.joined(separator: " · ")
+        WorktreeChanges(status).detail
     }
 
     // MARK: Rows
@@ -324,7 +341,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             switch synthetic.kind {
             case .wip: return .wip
             case .stash: return .stash(synthetic.id)
-            case .worktreeWIP: return nil
+            case .worktreeWIP: return .worktree(synthetic.id)
             }
         }
         let index = row - log.syntheticRows.count
@@ -352,7 +369,11 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         switch column {
         case .refs:
             let cell = reuse(tableView, column) { RefBadgeCellView() }
-            cell.badges = commit.flatMap { badges[$0.hash] } ?? []
+            if let worktree = worktree(synthetic) {
+                cell.badges = [RefBadge(kind: .worktree, name: worktree.name)]
+            } else {
+                cell.badges = commit.flatMap { badges[$0.hash] } ?? []
+            }
             cell.color = graphRow.color
             cell.metrics = metrics
             cell.needsDisplay = true
@@ -380,6 +401,11 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
                 cell.isItalic = false
             } else if synthetic?.kind == .stash {
                 cell.text = stash(synthetic?.id)?.message ?? "Stash"
+                cell.tone = .secondary
+                cell.isItalic = true
+            } else if let worktree = worktree(synthetic) {
+                cell.text = "// WIP"
+                cell.detail = worktree.changes.map(\.detail).flatMap { $0.isEmpty ? nil : $0 }
                 cell.tone = .secondary
                 cell.isItalic = true
             } else {
@@ -444,6 +470,12 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         log.stashes.first { $0.hash == hash }
     }
 
+    /// The other worktree of a worktree WIP row.
+    private func worktree(_ synthetic: GraphSyntheticRow?) -> WorktreeInfo? {
+        guard let synthetic, synthetic.kind == .worktreeWIP else { return nil }
+        return log.worktrees.first { $0.path == synthetic.id }
+    }
+
     private func reuse<Cell: NSView>(_ table: NSTableView, _ column: GraphColumn, make: () -> Cell) -> Cell {
         if let cell = table.makeView(withIdentifier: column.identifier, owner: nil) as? Cell { return cell }
         let cell = make()
@@ -457,9 +489,14 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         reportSelection()
     }
 
-    /// A click: the selection already changed at mouse down; a click that did not change it reports nothing new.
+    /// A click: the selection already changed at mouse down; a click that did not change it reports nothing new. A
+    /// click on another worktree's WIP row opens that worktree (only a click: arrows never open tabs).
     @objc func clicked(_ sender: Any?) {
         reportSelection()
+        guard let table, case .worktree(let path)? = item(at: table.clickedRow),
+              table.selectedRowIndexes == IndexSet(integer: table.clickedRow)
+        else { return }
+        view?.onOpenWorktree(path)
     }
 
     /// Checks out the double-clicked row (the hook); the first click of the pair has already selected it.
@@ -498,15 +535,30 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             return log.synthetic.firstIndex { $0.kind == .stash && $0.id == hash }
         case .commit(let hash):
             return log.commits.firstIndex { $0.hash == hash }.map { $0 + log.syntheticRows.count }
+        case .worktree(let path):
+            return log.synthetic.firstIndex { $0.kind == .worktreeWIP && $0.id == path }
         }
     }
 
+    /// Worktree rows are left out: a selection of only those (a click on one, an arrow onto one) reports nothing and
+    /// the detail stays.
     private func reportSelection() {
         guard let table, !isUpdating else { return }
-        let items = table.selectedRowIndexes.compactMap(item(at:))
-        guard items != reported else { return }
+        let items = table.selectedRowIndexes.compactMap(item(at:)).filter {
+            if case .worktree = $0 { false } else { true }
+        }
+        guard items != reported, !items.isEmpty || table.selectedRowIndexes.isEmpty else { return }
         reported = items
         view?.onSelect(items)
+    }
+
+    // MARK: Undo
+
+    func canHistory(redo: Bool) -> Bool { view?.canUndo(redo) ?? false }
+
+    func history(redo: Bool) {
+        guard canHistory(redo: redo) else { return }
+        view?.onUndo(redo)
     }
 
     // MARK: Menus

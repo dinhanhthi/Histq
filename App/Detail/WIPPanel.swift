@@ -21,8 +21,8 @@ struct WIPPanel: View {
     /// The controls whose write is running.
     @State private var busy: Set<Busy> = []
     @State private var errors: [Part: String] = [:]
-    /// The file whose discard waits for the confirmation.
-    @State private var pendingDiscard: FileChange?
+    /// The window's modal (`ModalHost`) asks before a discard.
+    @Environment(WindowModel.self) private var model
 
     fileprivate enum Busy: Hashable {
         case stage(String), unstage(String), discard(String), stageAll, unstageAll, commit, amendMessage
@@ -50,15 +50,6 @@ struct WIPPanel: View {
                 Spacer(minLength: 0)
             }
             CommitBox(session: session, stagedCount: staged.count, busy: $busy, error: errorBinding(.commit))
-        }
-        .confirmationDialog(
-            pendingDiscard.map(Self.discardTitle) ?? "", isPresented: discardIsPresented, titleVisibility: .visible,
-            presenting: pendingDiscard
-        ) { file in
-            Button(file.kind == .untracked ? "Delete" : "Discard", role: .destructive) { discard(file) }
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("This cannot be undone.")
         }
     }
 
@@ -98,7 +89,7 @@ struct WIPPanel: View {
                         HStack(spacing: 10) {
                             rowButton("arrow.uturn.backward",
                                       help: file.kind == .untracked ? "Delete File…" : "Discard Changes…",
-                                      busy: .discard(file.path)) { pendingDiscard = file }
+                                      busy: .discard(file.path)) { confirmDiscard(file) }
                             rowButton("plus.circle", help: "Stage File", busy: .stage(file.path)) {
                                 run(.stage([file.path]), busy: .stage(file.path), part: .unstaged)
                             }
@@ -208,8 +199,10 @@ struct WIPPanel: View {
         run(write, busy: .discard(file.path), part: .unstaged)
     }
 
-    private var discardIsPresented: Binding<Bool> {
-        Binding { pendingDiscard != nil } set: { if !$0 { pendingDiscard = nil } }
+    private func confirmDiscard(_ file: FileChange) {
+        model.presentModal(.confirmation(ModalConfirmation(
+            title: Self.discardTitle(file), message: "This cannot be undone.",
+            button: file.kind == .untracked ? "Delete" : "Discard", isDestructive: true) { discard(file) }))
     }
 
     private func errorBinding(_ part: Part) -> Binding<String?> {

@@ -1,4 +1,5 @@
-// One window's tabs: each is a repo, or a Welcome tab (no repo), with the selection and the page the window shows.
+// One window's tabs: each is a repo, or a Welcome tab (no repo), with the selection, the page the window shows and
+// the Settings modal over it.
 import Foundation
 import os
 
@@ -32,16 +33,21 @@ final class WindowModel {
     /// Session restore: the saved profile and commit of restored tabs that have no session yet (sessions are made on
     /// first select), applied when it is made; until then the next save keeps them as they were.
     @ObservationIgnored private var restored: [Tab.ID: SavedTab] = [:]
-    /// The page the window shows: the selected tab (`.home`), Settings or About.
+    /// The page the window shows: the selected tab (`.home`) or About.
     let navigation = Navigation()
-    /// The Settings page's section, kept while other pages show.
+    /// The Settings modal shows over the page (task 9.7). Read only by `ModalHost`, the toolbar and the backdrop
+    /// modifier, so opening it never re-evaluates `MainView`.
+    private(set) var isSettingsOpen = false
+    /// The Settings modal's section, kept while it is closed.
     private(set) var settingsSection: SettingsSection = .general
     /// Changes with every `selectSettings`, even of the same section: the section's placeholder and content lines
     /// follow it.
     private(set) var settingsToken = 0
-    /// The open command palette; nil while closed. Read only by `CommandPaletteOverlay`, so opening it redraws the
-    /// overlay alone.
+    /// The open command palette; nil while closed. Read only by `CommandPaletteOverlay` and `MainView`'s backdrop
+    /// modifier, so opening it never re-evaluates `MainView`'s body.
     private(set) var palette: CommandPaletteModel?
+    /// The window's modal that is not a repo operation's (those live on `RepoSession`); nil while closed.
+    private(set) var modal: WindowModal?
     /// Closes the window; set by the AppDelegate. Called when the tab strip closes the last tab.
     @ObservationIgnored var closeWindow: () -> Void = {}
 
@@ -56,14 +62,16 @@ final class WindowModel {
     /// The selected tab's session; nil for a Welcome tab.
     var selectedSession: RepoSession? { selectedTabID.flatMap { sessions[$0] } }
 
-    /// The selected tab's session while the tab shows (not Settings or About, where its dialogs have no presenter);
-    /// nil for a Welcome tab. The toolbar's repo actions are disabled without it.
+    /// The selected tab's session while the tab shows (not About, where its dialogs have no presenter); nil for a
+    /// Welcome tab. The toolbar's repo actions are disabled without it. Settings is a modal over the tab, so a
+    /// toolbar action taken meanwhile opens its form or confirmation above the Settings modal.
     var actionSession: RepoSession? { navigation.page == .home ? selectedSession : nil }
 
     /// Opens a repo in a tab and selects it: the tab that already shows it, else the selected tab if it is a
     /// Welcome tab, else a new tab. `nil` opens a new Welcome tab.
     func openTab(_ url: URL?) {
         navigation.page = .home
+        closeSettings()
         guard let url = url?.standardizedFileURL else {
             let tab = Tab()
             tabs.append(tab)
@@ -108,11 +116,12 @@ final class WindowModel {
         tabs[index].repoURL = url
     }
 
-    /// Selects the tab at `index` and shows it (leaving Settings or About): the path a click on a tab takes.
+    /// Selects the tab at `index` and shows it (leaving About, closing Settings): the path a click on a tab takes.
     /// The tab already selected is only shown again (its loaded detail stays); no `select` timing line then.
     func selectTab(at index: Int) {
         guard tabs.indices.contains(index) else { return }
         navigation.page = .home
+        closeSettings()
         guard tabs[index].id != selectedTabID else { return }
         UITiming.select("tab \(index)")
         selectedTabID = tabs[index].id
@@ -124,14 +133,19 @@ final class WindowModel {
     private func activateSelectedTab() {
         guard let index = selectedIndex, let url = tabs[index].repoURL, !tabs[index].isMissing else { return }
         let id = tabs[index].id
+        let isNew = sessions[id] == nil
         let session = sessions[id] ?? makeSession(for: id, url: url)
         sessions[id] = session
         session.select(session.selection)
+        // Another worktree may have changed in its own tab meanwhile; a new session reads them after its first page.
+        if !isNew { session.refreshWorktrees() }
     }
 
     /// A tab's session, with the profile and commit a restored tab had in the saved session.
     private func makeSession(for id: Tab.ID, url: URL) -> RepoSession {
         let session = RepoSession(url: url)
+        // A worktree's "Open in New Tab" and its graph row open it in this window.
+        session.openInTab = { [weak self] url in self?.openTab(url) }
         if let saved = restored.removeValue(forKey: id) {
             if let profile = saved.profile { session.restoreProfile(profile.profileID) }
             if let commit = saved.commit { session.restoreSelection(commit) }
@@ -225,16 +239,35 @@ final class WindowModel {
         tabs.insert(tab, at: destination)
     }
 
-    /// Shows Settings, or the selected tab again when Settings is already shown.
+    /// The toolbar's Settings button: opens the Settings modal, or closes it when it shows.
     func toggleSettings() {
-        navigation.page = navigation.page == .settings ? .home : .settings
+        if isSettingsOpen { closeSettings() } else { openSettings() }
     }
 
-    /// Shows Settings at `section`: the path a click on a Settings sidebar row takes. The section switches in this
-    /// call; a section whose data is still loading shows its placeholder in the same frame.
+    /// Opens the Settings modal at its last section (⌘,), over the page as it is. Whatever was open over the page
+    /// closes first, as the page switch did before 9.7: the palette, a window modal, the tab's form or confirmation.
+    func openSettings() {
+        guard !isSettingsOpen else { return }
+        palette = nil
+        modal = nil
+        if let session = selectedSession, session.hasModal { session.closeModals() }
+        isSettingsOpen = true
+    }
+
+    /// Closes the Settings modal (Escape, its close button, a click on its scrim, the Settings button) with any
+    /// modal it opened above it (Generate Key, a profile's deletion), which would have nothing to return to.
+    func closeSettings() {
+        guard isSettingsOpen else { return }
+        modal = nil
+        isSettingsOpen = false
+    }
+
+    /// Shows Settings at `section`: the path a click on a Settings sidebar row takes (and a palette row, the
+    /// profile chip's Edit Profiles…). The modal opens and the section switches in this call; a section whose data is
+    /// still loading shows its placeholder in the same frame.
     func selectSettings(_ section: SettingsSection) {
         UITiming.select("settings \(section.rawValue)")
-        navigation.page = .settings
+        openSettings()
         settingsSection = section
         settingsToken &+= 1
     }
@@ -244,8 +277,28 @@ final class WindowModel {
     /// Opens the command palette on the window's rows now (`PaletteCommands`), `query` typed; the card shows in this
     /// frame, its rows once ranked off the main actor.
     func openPalette(query: String = "") {
+        // ⌘K and the toolbar's Search stay live over a modal: the palette waits until it closes.
+        guard modal == nil, !isSettingsOpen, actionSession?.hasModal != true else { return }
         UITiming.select("palette")
         palette = CommandPaletteModel(snapshot: PaletteCommands.snapshot(for: self), query: query)
+    }
+
+    /// The palette, Settings or a modal shows: `MainView` blurs and disables the content behind it.
+    var isShowingModal: Bool {
+        palette != nil || isSettingsOpen || modal != nil || actionSession?.hasModal == true
+    }
+
+    // MARK: Modals
+
+    /// Opens a window modal (a confirmation of a view, Generate Key): `ModalHost` shows it in this frame, over the
+    /// content. The palette closes first: one modal at a time.
+    func presentModal(_ modal: WindowModal) {
+        palette = nil
+        self.modal = modal
+    }
+
+    func closeModal() {
+        modal = nil
     }
 
     /// ⌘K: opens the palette, or closes it when it is open.
@@ -278,12 +331,12 @@ final class WindowModel {
             selectTab(at: index)
         case .settings:
             guard let value = request.value else {
-                navigation.page = .settings
+                openSettings()
                 return
             }
             guard let section = SettingsSection(rawValue: value) else {
                 Self.logger.error("-HistqSelect settings: unknown section \(value, privacy: .public)")
-                navigation.page = .settings
+                openSettings()
                 return
             }
             selectSettings(section)

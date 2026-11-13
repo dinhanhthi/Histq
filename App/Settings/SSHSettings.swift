@@ -31,7 +31,26 @@ struct SSHSettings: View {
             SettingsSkeletonGroup(rows: 3)
             SettingsSkeletonGroup(rows: 1)
         }
+        #if DEBUG
+        .onChange(of: isLoading, initial: true) { debugGenerateKey() }
+        #endif
     }
+
+    #if DEBUG
+    /// DEBUG `-HistqGenerateKey`: once the profiles are read, opens Generate Key for the shown profile as its button
+    /// does, adding a "QA" profile first when there is none (state dir only). For QA shots.
+    private func debugGenerateKey() {
+        guard !isLoading, !Self.debugGenerateKeyDone, ProcessInfo.processInfo.arguments.contains("-HistqGenerateKey"),
+              let store = library.store
+        else { return }
+        Self.debugGenerateKeyDone = true
+        let id = store.profile(id: profileID ?? UUID())?.id ?? store.profiles.first?.id
+            ?? library.addProfile(identity: Profile.Identity(name: "QA", email: "qa@histq.invalid"))
+        if let id { onGenerate(id) }
+    }
+
+    private static var debugGenerateKeyDone = false
+    #endif
 
     private var isLoading: Bool {
         switch library.state {
@@ -210,6 +229,9 @@ struct GenerateKeyModal: View {
     @State private var comment = ""
     @State private var state: GenerateState = .editing
     @State private var copied = false
+    @FocusState private var pathFocused: Bool
+    /// The cards' height, the scroll view's cap; first about the form's.
+    @State private var cardsHeight: CGFloat = 112
 
     private enum GenerateState {
         case editing
@@ -221,39 +243,45 @@ struct GenerateKeyModal: View {
     private var library: ProfileLibrary { .shared }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Generate SSH Key")
-                    .font(.title2.weight(.semibold))
-                Spacer(minLength: 0)
-                if case .done = state {
-                    Button("Done", action: onClose)
-                        .buttonStyle(BottomBarButtonStyle(height: 28, prominent: true, horizontalPadding: 12))
-                } else {
-                    Button("Cancel", action: onClose)
-                        .buttonStyle(BottomBarButtonStyle(height: 28, horizontalPadding: 12))
-                    Button("Generate", action: generate)
-                        .buttonStyle(BottomBarButtonStyle(height: 28, prominent: true, horizontalPadding: 12))
-                        .disabled(isRunning || path.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-            // Symmetric vertical padding at the top of the card.
-            .padding(.horizontal, SettingsMetrics.cardPadding)
-            .padding(.vertical, SettingsMetrics.cardPadding + 6)
-            Divider()
+        ModalCard(title: "Generate SSH Key", subtitle: "An ed25519 key pair for this profile, written next to your "
+                  + "other keys.", systemImage: "key", width: 560) {
+            // As tall as the cards, scrolling only when the window is shorter (the public key and its hint).
             ScrollView {
-                VStack(alignment: .leading, spacing: SettingsMetrics.cardSpacing) {
-                    form
-                    if case .done(let keyPath, let publicKey) = state {
-                        result(path: keyPath, publicKey: publicKey)
-                    }
-                }
-                .labeledContentStyle(.settingsRow)
-                .padding(SettingsMetrics.pagePadding)
+                cards
+                    .onGeometryChange(for: CGFloat.self, of: \.size.height) { cardsHeight = $0 }
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: cardsHeight)
+        } actions: {
+            if case .done = state {
+                Button("Done", action: onClose)
+                    .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                    .keyboardShortcut(.cancelAction)
+            } else {
+                Button("Cancel", action: onClose)
+                    .buttonStyle(RowTextButtonStyle(formRow: true))
+                    .keyboardShortcut(.cancelAction)
+                Button("Generate", action: generate)
+                    .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                    .disabled(isRunning || path.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
-        .frame(minWidth: 480)
-        .onAppear(perform: fillDefaults)
+        .onAppear {
+            fillDefaults()
+            // The card is installed on this turn; the path field takes the focus on the next one.
+            DispatchQueue.main.async { pathFocused = true }
+        }
+    }
+
+    /// The form, then the new public key once generated: cards of the modal's container.
+    private var cards: some View {
+        VStack(alignment: .leading, spacing: PanelContainerMetrics.padding) {
+            form
+            if case .done(let keyPath, let publicKey) = state {
+                result(path: keyPath, publicKey: publicKey)
+            }
+        }
+        .labeledContentStyle(.settingsRow)
     }
 
     private var isRunning: Bool {
@@ -265,6 +293,7 @@ struct GenerateKeyModal: View {
             LabeledContent {
                 TextField("Path", text: $path, prompt: Text("~/.ssh/id_ed25519_work"))
                     .textFieldStyle(.settings)
+                    .focused($pathFocused)
                     .frame(maxWidth: 280)
                     .labelsHidden()
             } label: {

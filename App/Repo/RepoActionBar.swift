@@ -8,9 +8,9 @@ import HistqCore
 import SwiftUI
 
 /// The toolbar's buttons: the key of the operation each one shows. `checkout` is the branch menu's (every checkout,
-/// wherever it started).
+/// wherever it started); `undo` and `redo` are the history buttons' (also ⌘Z / ⇧⌘Z and the palette).
 enum ActionBarAction: Hashable, Sendable {
-    case pull, push, fetch, branch, stash, pop, checkout
+    case pull, push, fetch, branch, stash, pop, checkout, undo, redo
 }
 
 /// The host-key sheet's state: the host, whether ssh reported a changed key (then it only warns), and the scan.
@@ -202,12 +202,15 @@ struct ActionErrorBanner: View {
     /// What the hint's button does.
     enum Action {
         case checkHostKey, pull, forceDelete(String)
+        /// A worktree git refused to remove for its changes: the forced removal, confirmed.
+        case forceRemoveWorktree(String)
 
         var title: String {
             switch self {
             case .checkHostKey: "Check Host Key…"
             case .pull: "Pull"
             case .forceDelete: "Delete Anyway…"
+            case .forceRemoveWorktree: "Remove Anyway…"
             }
         }
     }
@@ -222,6 +225,10 @@ struct ActionErrorBanner: View {
     static func hint(for failure: OperationFailure) -> Hint {
         if case .deleteBranch(let name, false) = failure.write, failure.message.contains("not fully merged") {
             return Hint(text: "\(name) has commits that no other branch has.", action: .forceDelete(name))
+        }
+        if case .removeWorktree(let path, false) = failure.write, failure.message.contains("modified or untracked") {
+            return Hint(text: "The worktree has uncommitted changes or untracked files.",
+                        action: .forceRemoveWorktree(path))
         }
         guard let error = failure.error as? GitError else { return Hint() }
         switch error {
@@ -264,6 +271,10 @@ struct ActionErrorBanner: View {
             session.confirm("Delete branch \(name) anyway?",
                             message: "Its commits that no other branch has will be lost.", button: "Delete Branch",
                             write: .deleteBranch(name, force: true), operation: "Delete branch \(name)")
+        case .forceRemoveWorktree(let path):
+            let name = URL(filePath: path).lastPathComponent
+            let changes = session.worktrees.value?.first { $0.path == path }?.changes?.detail
+            RepoMenus.confirmForceRemove(path, name: name, changes: changes, session)
         }
     }
 }
@@ -275,40 +286,37 @@ struct ActionErrorBanner: View {
 struct HostKeySheet: View {
     let session: RepoSession
     let check: HostKeyCheck
-    @Environment(\.dismiss) private var dismiss
+    let onClose: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label(check.isChanged ? "The host key has changed" : "Unknown host",
-                  systemImage: check.isChanged ? "exclamationmark.octagon.fill" : "key.horizontal")
-                .font(.title3.weight(.semibold))
-            if let host = check.host {
-                Text(host.knownHostsName)
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-            }
-            content
-            HStack(spacing: 8) {
-                Spacer()
-                Button(trustable == nil ? "Close" : "Cancel") { dismiss() }
-                    .buttonStyle(RowTextButtonStyle(formRow: true))
-                    .keyboardShortcut(.cancelAction)
-                if let scan = trustable {
-                    Button {
-                        session.trustHost(scan)
-                    } label: {
-                        HStack(spacing: 6) {
-                            if case .trusting = check.state { ProgressView().controlSize(.mini) }
-                            Text("Trust Host")
-                        }
-                    }
-                    .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
-                    .disabled(isTrusting)
+        ModalCard(title: check.isChanged ? "The host key has changed" : "Unknown host",
+                  systemImage: check.isChanged ? "exclamationmark.octagon.fill" : "key.horizontal", width: 480,
+                  takesFocus: true) {
+            ModalSection(spacing: 10) {
+                if let host = check.host {
+                    Text(host.knownHostsName)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
                 }
+                content
+            }
+        } actions: {
+            Button(trustable == nil ? "Close" : "Cancel", action: onClose)
+                .buttonStyle(RowTextButtonStyle(formRow: true))
+                .keyboardShortcut(.cancelAction)
+            if let scan = trustable {
+                Button {
+                    session.trustHost(scan)
+                } label: {
+                    HStack(spacing: 6) {
+                        if case .trusting = check.state { ProgressView().controlSize(.mini) }
+                        Text("Trust Host")
+                    }
+                }
+                .buttonStyle(RowTextButtonStyle(formRow: true, prominent: true))
+                .disabled(isTrusting)
             }
         }
-        .padding(20)
-        .frame(width: 480)
     }
 
     /// The scan the user can trust: never for a changed key.

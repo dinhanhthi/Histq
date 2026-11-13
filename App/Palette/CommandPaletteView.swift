@@ -23,17 +23,14 @@ struct CommandPaletteOverlay: View {
     var body: some View {
         if let palette = model.palette {
             ZStack(alignment: .top) {
-                Rectangle()
-                    .fill(Palette.scrim)
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.closePalette() }
-                    .accessibilityHidden(true)
+                // The modals' backdrop: this scrim, over the window content `MainView` blurs meanwhile.
+                ModalScrim { model.closePalette() }
                 CommandPaletteView(model: model, palette: palette)
                     .padding(.top, CommandPaletteMetrics.topMargin)
             }
             // A new view per opening: the highlight, the focus to restore and the timing lines start over.
             .id(ObjectIdentifier(palette))
-            // The toolbar stays live above the scrim: a tab or page change (Settings, ⌘W, the repo menu) closes the
+            // The toolbar stays live above the scrim: a tab or page change (About, ⌘W, the repo menu) closes the
             // palette, whose repo rows act on the session and page it opened on.
             .onChange(of: model.selectedTabID) { model.closePalette() }
             .onChange(of: model.navigation.page) { model.closePalette() }

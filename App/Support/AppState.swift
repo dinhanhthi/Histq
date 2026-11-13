@@ -19,6 +19,11 @@ enum AppState {
         #endif
     }
 
+    /// DEBUG `-HistqBackground YES`: the app never activates itself, and its windows are ordered behind the others
+    /// and never made key (with a state dir, on the "ARZOPA" display when connected), so a preview or a QA shot
+    /// (`scripts/shot.sh` always passes it) never takes the user's focus or covers their work. Always false in Release.
+    static let isBackgroundLaunch: Bool = launchFlag("-HistqBackground") == "YES"
+
     /// The folder given by DEBUG `-HistqStateDir <dir>`: automated launches keep all their state there (files,
     /// timing logs) and use the QA preferences suite and Keychain service. nil in normal runs.
     static let stateDirectory: URL? = launchFlag("-HistqStateDir").map {

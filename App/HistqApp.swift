@@ -193,11 +193,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Full size content: the background runs under the toolbar too.
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.isReleasedWhenClosed = false
-        window.setContentSize(WindowSizing.initialSize(on: NSScreen.main))
+        let previewScreen = WindowSizing.previewScreen
+        window.setContentSize(WindowSizing.initialSize(on: previewScreen ?? NSScreen.main))
         WindowSizing.clampMinimum(of: window)
         if let frame, NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
             // A restored frame (a QA run's comes from its own state dir); one on a screen that is gone is not used.
             window.setFrame(frame, display: false)
+        } else if let previewScreen {
+            // A background QA run: centered on the preview screen, away from the user's work.
+            let visible = previewScreen.visibleFrame
+            window.setFrameOrigin(NSPoint(x: visible.midX - window.frame.width / 2,
+                                          y: visible.midY - window.frame.height / 2))
         } else if AppState.isStateDirMode {
             // QA runs never read or write the user's saved frame: AppKit keeps it in the standard defaults.
             window.center()
@@ -258,16 +264,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // The group's selected tab goes on screen first (no other tab flashes); the others join it in their saved
             // order, each next to its neighbour (`.above` = after it, `.below` = before it).
             let selected = group.firstIndex(where: \.isSelectedInGroup) ?? 0
-            windows[selected].window.orderFront(nil)
+            present(windows[selected].window, key: false)
             for index in windows.indices.dropFirst(selected + 1) {
                 windows[index - 1].window.addTabbedWindow(windows[index].window, ordered: .above)
             }
             for index in windows.indices.prefix(selected).reversed() {
                 windows[index + 1].window.addTabbedWindow(windows[index].window, ordered: .below)
             }
-            windows[selected].window.makeKeyAndOrderFront(nil)
+            present(windows[selected].window)
         }
-        NSApp.activate()
+        if !AppState.isBackgroundLaunch { NSApp.activate() }
     }
 
     /// The open windows as the session saves them: grouped by native tab group, groups front to back (the front
@@ -301,8 +307,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func show(_ entry: Entry) {
-        entry.window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        present(entry.window)
+        if !AppState.isBackgroundLaunch { NSApp.activate() }
+    }
+
+    /// Puts `window` on screen, in front and key (or only in front). A DEBUG `-HistqBackground YES` launch (QA shots,
+    /// the preview) orders it behind every other window instead and never makes it key: it must not take the user's
+    /// focus or cover their work. `screencapture -l` still captures it.
+    private func present(_ window: NSWindow, key: Bool = true) {
+        if AppState.isBackgroundLaunch {
+            window.orderBack(nil)
+        } else if key {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            window.orderFront(nil)
+        }
     }
 
     /// The native tab bar's "+": a new window with a Welcome tab, as the next native tab of `window`'s group.
@@ -417,7 +436,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             NSApp.keyWindow?.performClose(sender)
             return
         }
-        // Settings or About hides the tab: ⌘W leaves the page first, never closing a tab out of sight.
+        // Settings or About hides the tab: ⌘W closes Settings or leaves the page first, never closing a tab out of
+        // sight.
+        if entry.model.isSettingsOpen {
+            entry.model.closeSettings()
+            return
+        }
         if entry.model.navigation.page != .home {
             entry.model.navigation.page = .home
             return
@@ -432,16 +456,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         entry.model.togglePalette()
     }
 
-    /// Opens the Settings page in the key window.
+    /// Opens the Settings modal in the key window (⌘,); it stays open when it already shows.
     @objc func showSettings() {
         let entry = target() ?? newWindow()
-        entry.model.navigation.page = .settings
+        entry.model.openSettings()
         show(entry)
     }
 
-    /// Opens the About page in the key window.
+    /// Opens the About page in the key window, closing Settings over it.
     @objc func showAbout() {
         let entry = target() ?? newWindow()
+        entry.model.closeSettings()
         entry.model.navigation.page = .about
         show(entry)
     }
@@ -475,9 +500,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         fileMenu.addItem(withTitle: "Close Tab", action: #selector(closeTab(_:)), keyEquivalent: "w").target = self
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "W")
         let editMenu = NSMenu(title: "Edit")
-        // No typed selectors for these: the responder chain (text views, the window's undo manager) answers them.
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        // Nil-targeted: the responder chain (text views, the window's undo manager, the graph) answers `undo:`/`redo:`.
+        // AppKit declares no Swift method for them, so the graph table's own `undo(_:)`/`redo(_:)` name the selectors.
+        editMenu.addItem(withTitle: "Undo", action: #selector(GraphTableView.undo(_:)), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: #selector(GraphTableView.redo(_:)), keyEquivalent: "Z")
         editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
@@ -504,6 +530,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 private enum WindowSizing {
     /// A new window's size when the screen has room for it.
     static let preferred = NSSize(width: 1200, height: 760)
+
+    /// A background QA run's screen (DEBUG `-HistqBackground YES` with a state dir): the display named "ARZOPA" when
+    /// connected, so its windows open away from the user's work; nil otherwise (the usual placement).
+    static var previewScreen: NSScreen? {
+        guard AppState.isBackgroundLaunch, AppState.isStateDirMode else { return nil }
+        return NSScreen.screens.first { $0.localizedName.localizedCaseInsensitiveContains("ARZOPA") }
+    }
 
     /// `preferred`, at least the minimum, at most the screen's visible frame.
     static func initialSize(on screen: NSScreen?) -> NSSize {
