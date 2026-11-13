@@ -97,6 +97,56 @@ enum Palette {
     static let graphSelection = NSColor.white.withAlphaComponent(0.11)
     static let graphSelectionBorder = NSColor.white.withAlphaComponent(0.10)
 
+    // MARK: Diff (AppKit: the diff table draws its rows in `draw(_:)`)
+
+    /// An added line's row and the changed part of it (intraline), green on `surface`. #5CC98A at 0.14 / 0.36
+    static let diffAddedFill = srgb(0x5CC98A).withAlphaComponent(0.14)
+    static let diffAddedEmphasis = srgb(0x5CC98A).withAlphaComponent(0.36)
+    /// A removed line's row and the changed part of it, red on `surface`. #F0605C at 0.15 / 0.38
+    static let diffRemovedFill = srgb(0xF0605C).withAlphaComponent(0.15)
+    static let diffRemovedEmphasis = srgb(0xF0605C).withAlphaComponent(0.38)
+    /// The `+` and `−` gutter signs. #5CC98A / #F0605C
+    static let diffAddedSign = srgb(0x5CC98A)
+    static let diffRemovedSign = srgb(0xF0605C)
+    /// A hunk header row's band. White 0.05
+    static let diffHunkFill = NSColor.white.withAlphaComponent(0.05)
+    /// The line numbers in the gutters. White 0.35
+    static let diffLineNumber = NSColor.white.withAlphaComponent(0.35)
+    /// Code text without a token. White 0.86
+    static let diffText = NSColor.white.withAlphaComponent(0.86)
+
+    // MARK: Conflict editor (AppKit: its panes draw their rows in `draw(_:)`)
+
+    /// Side A (ours, stage 2): its badge, a conflict line's edge bar, the line's band and a ticked line's band.
+    /// #5E9CF0 / at 0.16 / at 0.34
+    static let conflictA = srgb(0x5E9CF0)
+    static let conflictAFill = srgb(0x5E9CF0).withAlphaComponent(0.16)
+    static let conflictATickedFill = srgb(0x5E9CF0).withAlphaComponent(0.34)
+    /// Side B (theirs, stage 3), gold. #F2B630 / at 0.14 / at 0.32
+    static let conflictB = srgb(0xF2B630)
+    static let conflictBFill = srgb(0xF2B630).withAlphaComponent(0.14)
+    static let conflictBTickedFill = srgb(0xF2B630).withAlphaComponent(0.32)
+    /// An unresolved conflict in Output (it still shows the base text): its edge bar and band. #E260B0 / at 0.22
+    static let conflictUnresolved = srgb(0xE260B0)
+    static let conflictUnresolvedFill = srgb(0xE260B0).withAlphaComponent(0.22)
+    /// Output lines the user typed (a manual edit). White 0.07
+    static let conflictEditedFill = NSColor.white.withAlphaComponent(0.07)
+
+    // MARK: Syntax (Xcode's Default (Dark) family, on `surface`)
+
+    /// #FC5FA3
+    static let syntaxKeyword = srgb(0xFC5FA3)
+    /// #FC6A5D
+    static let syntaxString = srgb(0xFC6A5D)
+    /// #D0BF69
+    static let syntaxNumber = srgb(0xD0BF69)
+    /// #7F8C99
+    static let syntaxComment = srgb(0x7F8C99)
+    /// #5DD8FF
+    static let syntaxType = srgb(0x5DD8FF)
+    /// White 0.6
+    static let syntaxPunctuation = NSColor.white.withAlphaComponent(0.6)
+
     /// An opaque sRGB color from `0xRRGGBB`.
     private static func srgb(_ hex: UInt32) -> NSColor {
         NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,

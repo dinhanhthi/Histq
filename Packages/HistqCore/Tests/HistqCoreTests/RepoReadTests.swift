@@ -1,6 +1,7 @@
 // Key feature tests for the readers (task 2.4) on a private copy of the `graph` fixture: the history the
 // graph lays out (merges keep both parents, stash internals never become rows), the ref labels with their
-// upstream counts and peeled tags, the working tree status, and the stash and worktree rows.
+// upstream counts and peeled tags, the working tree status, and the stash and worktree rows. Regression
+// (task 6.3): a merge commit's diff is against its first parent, so a cleanly merged file is not empty.
 import Foundation
 import HistqCore
 import Testing
@@ -167,5 +168,26 @@ struct RepoReadTests {
         let wtTip = try await graph.copy.git(["rev-parse", "wt"], in: graph.repo)
         #expect(!linked.isMain && resolved(linked.path) == resolved(graph.copy.repo("graph-wt").path))
         #expect(linked.branch == "refs/heads/wt" && linked.head == wtTip && !linked.isDetached)
+    }
+
+    @Test("a merge commit's diff is against its first parent: its files match diff-tree <first parent> <merge>")
+    func mergeCommitDiffIsAgainstFirstParent() async throws {
+        let graph = try await Graph()
+        defer { graph.copy.remove() }
+        // v1.0 = "Merge branch 'develop'": a clean merge, so a combined diff (`--cc`) has no file at all.
+        let expected = try await graph.copy.git(
+            ["diff-tree", "-r", "--name-only", "--no-commit-id", "v1.0^1", "v1.0"], in: graph.repo
+        ).split(separator: "\n").map(String.init)
+        try #require(!expected.isEmpty)
+        let diffs = try await DiffReader.commit("v1.0", runner: graph.runner, cwd: graph.repo, env: graph.env)
+        #expect(diffs.map(\.path) == expected)
+        #expect(diffs.allSatisfy { !$0.isCombined && !$0.hunks.isEmpty })
+
+        let config = try await DiffReader.commit(
+            "v1.0", runner: graph.runner, cwd: graph.repo, env: graph.env, paths: ["src/config.swift"])
+        let numstat = try await graph.copy.git(
+            ["diff", "--numstat", "v1.0^1", "v1.0", "--", "src/config.swift"], in: graph.repo)
+        #expect(config.count == 1)
+        #expect(config.first.map { "\($0.additions)\t\($0.deletions)\tsrc/config.swift" } == numstat)
     }
 }

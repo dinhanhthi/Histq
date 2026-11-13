@@ -1,7 +1,7 @@
 // The changed files of a commit, a stash or the working tree, as one row per path or as a folder tree (the toggle
 // is saved in `PrefKey.fileListMode`). Each row has a status icon, a context menu (the caller's entries, such as
 // "Checkout File from This Commit", then Copy Path and Reveal in Finder) and the caller's trailing buttons (stage,
-// unstage, discard).
+// unstage, discard). A click on a row opens that file's diff when the caller asks for it (`onSelectFile`).
 import AppKit
 import SwiftUI
 
@@ -107,6 +107,10 @@ struct FileListView<Trailing: View>: View {
     @ViewBuilder let trailing: (FileChange) -> Trailing
     /// The caller's context menu entries of a row, above Copy Path and Reveal in Finder.
     var menu: (FileChange) -> [MenuEntry] = { _ in [] }
+    /// The path of the row drawn as selected (the file whose diff is open).
+    var selectedPath: String?
+    /// A click on a row; nil leaves rows unclickable.
+    var onSelect: ((FileChange) -> Void)?
     @AppStorage(PrefKey.fileListMode.rawValue, store: Preferences.defaults) private var mode = FileListMode.path.rawValue
 
     static var rowHeight: CGFloat { 26 }
@@ -115,6 +119,15 @@ struct FileListView<Trailing: View>: View {
     func fileMenu(_ menu: @escaping (FileChange) -> [MenuEntry]) -> Self {
         var list = self
         list.menu = menu
+        return list
+    }
+
+    /// The list with clickable rows: a click calls `action` at once (the diff's placeholder shows in that frame), and
+    /// the row of `selected` is drawn as selected.
+    func onSelectFile(selected: String?, _ action: @escaping (FileChange) -> Void) -> Self {
+        var list = self
+        list.selectedPath = selected
+        list.onSelect = action
         return list
     }
 
@@ -127,12 +140,13 @@ struct FileListView<Trailing: View>: View {
                         FolderRow(name: name, depth: row.depth)
                     case .file(let file):
                         FileRow(file: file, repoURL: repoURL, depth: row.depth, showsFolder: false, trailing: trailing,
-                                menu: menu)
+                                menu: menu, isSelected: file.path == selectedPath, onSelect: onSelect)
                     }
                 }
             } else {
                 ForEach(files) { file in
-                    FileRow(file: file, repoURL: repoURL, depth: 0, showsFolder: true, trailing: trailing, menu: menu)
+                    FileRow(file: file, repoURL: repoURL, depth: 0, showsFolder: true, trailing: trailing, menu: menu,
+                            isSelected: file.path == selectedPath, onSelect: onSelect)
                 }
             }
         }
@@ -172,6 +186,8 @@ private struct FileRow<Trailing: View>: View {
     let showsFolder: Bool
     let trailing: (FileChange) -> Trailing
     let menu: (FileChange) -> [MenuEntry]
+    let isSelected: Bool
+    let onSelect: ((FileChange) -> Void)?
     @State private var hovered = false
 
     var body: some View {
@@ -197,9 +213,14 @@ private struct FileRow<Trailing: View>: View {
         .padding(.leading, 6 + CGFloat(depth) * 14)
         .padding(.trailing, 6)
         .frame(height: FileListView<EmptyView>.rowHeight)
-        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(hovered ? Palette.hoverFill : .clear))
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(isSelected ? Palette.selectedFill : hovered ? Palette.hoverFill : .clear))
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
+        // A single tap only (no double-tap on the row), so the click acts at mouse-up without a wait; the row's
+        // buttons keep their own clicks.
+        .onTapGesture { onSelect?(file) }
+        .accessibilityAddTraits(onSelect == nil ? [] : .isButton)
         .help(file.originalPath.map { "\($0) → \(file.path)" } ?? file.path)
         .contextMenu {
             let entries = menu(file)

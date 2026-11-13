@@ -1,4 +1,4 @@
-// The diff model and its loaders: unified diffs (`git diff`, `git diff --cached`, `git diff-tree --cc`)
+// The diff model and its loaders: unified diffs (`git diff`, `git diff --cached`, `git diff-tree`)
 // parsed into files, hunks and lines, plus a file's bytes at a revision (`git show`).
 //
 // Output is parsed as bytes: a line keeps its exact bytes (CR, non-UTF-8 text) so PatchBuilder can replay
@@ -174,9 +174,9 @@ public enum DiffReader {
         try await load(stagedArguments(paths: paths, context: context), runner: runner, cwd: cwd, env: env)
     }
 
-    /// A commit against its first parent (a root commit against the empty tree). A merge commit gives git's
-    /// combined diff (`--cc`, files marked `isCombined`, read-only); a merge that took every file from one
-    /// side without edits has no combined hunks, so its diff is empty.
+    /// A commit against its first parent (a root commit against the empty tree). A merge commit (and a stash)
+    /// is diffed against its first parent too (`--diff-merges=first-parent`), so its files match the commit's
+    /// file list: a combined diff (`--cc`) would drop every file the merge took from one side without edits.
     public static func commit(
         _ revision: String, runner: GitRunner, cwd: URL, env: [String: String], paths: [String] = [],
         context: Int? = nil
@@ -212,7 +212,9 @@ public enum DiffReader {
     }
 
     static func commitArguments(_ revision: String, paths: [String], context: Int?) -> [String] {
-        ["--literal-pathspecs", "diff-tree", "-r", "-p", "--root", "--cc", "--no-commit-id"] + formatOptions
+        // `-m --first-parent` would not do: diff-tree ignores `--first-parent` and prints every parent's diff.
+        ["--literal-pathspecs", "diff-tree", "-r", "-p", "--root", "--diff-merges=first-parent", "--no-commit-id"]
+            + formatOptions
             + contextOption(context) + ["--end-of-options", revision, "--"] + paths
     }
 

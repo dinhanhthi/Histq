@@ -172,6 +172,8 @@ final class RepoSession: Identifiable {
         case discardAll(includingUntracked: Bool)
         case commit(message: String)
         case amend(message: String)
+        /// Selected lines of a diff (`PatchBuilder.patch`): staged, unstaged or discarded with `git apply`.
+        case applyPatch(Data, PatchBuilder.Action)
 
         case checkoutBranch(String)
         /// A local branch `localName` tracking the remote branch (`origin/x`), checked out.
@@ -219,6 +221,19 @@ final class RepoSession: Identifiable {
         case createTag(String, at: String, message: String?)
         case deleteTag(String)
 
+        /// A conflicted file resolved by the conflict editor: `content` written to it (atomically, keeping its mode),
+        /// or the file deleted when nil, then `git add` so the path leaves the unmerged list.
+        case resolveConflict(path: String, content: Data?)
+        /// `git mergetool` on one conflicted path: `tool` is `PrefKey.mergeTool`, nil for git's configured tool. It runs
+        /// the repo's configured merge command, so only on the user's click.
+        case mergeTool(path: String, tool: String?)
+
+        /// The operation banner's buttons: `git <merge|rebase|cherry-pick|revert> --continue|--abort|--skip` (never
+        /// waits for an editor: `GitOperations` passes `-c core.editor=true`).
+        case continueOperation(RepoState.Operation)
+        case abortOperation(RepoState.Operation)
+        case skipOperation(RepoState.Operation)
+
         /// The remote a network write talks to, for the host-key check of its failure.
         var remote: String? {
             switch self {
@@ -249,6 +264,9 @@ final class RepoSession: Identifiable {
     private(set) var status: Loadable<WorkingStatus> = .idle
     private(set) var refs: Loadable<Refs> = .idle
     private(set) var log: Loadable<LogSnapshot> = .idle
+    /// The merge, rebase, cherry-pick or revert in progress (the operation banner), read with every status read; nil
+    /// until the first one.
+    private(set) var repoState: RepoState?
 
     /// The sidebar's tab, its selected row and its expanded section cards, kept per tab. A click sets them at once; the
     /// branch actions come in Phase 5.
@@ -286,6 +304,27 @@ final class RepoSession: Identifiable {
     @ObservationIgnored private var stashes: [Stash]?
     @ObservationIgnored private let watcher = RepoWatcher()
 
+    /// The file panel2 shows instead of the graph (a click in the WIP panel or a commit's files); nil shows the graph.
+    private(set) var openFile: FileTarget?
+    /// The open file's diff: `.loading` in the same call as the click, then its cards.
+    private(set) var fileDiff: Loadable<FileDiffDetail> = .idle
+    /// Changes with every file select (and "Load anyway"): the diff placeholder logs a line per select.
+    private(set) var fileToken = 0
+    /// Hunks only, or the whole file with its changes; kept while other files are opened.
+    var diffMode: DiffMode = .diff
+    @ObservationIgnored private var fileTask: Task<Void, Never>?
+    /// The user chose "Load anyway" on the open file's size card.
+    @ObservationIgnored private var fileIgnoresSizeLimit = false
+    /// Numbers the file loads, so the diff tables tell a reloaded diff (after a stage) from a redraw.
+    @ObservationIgnored private var fileLoadCount = 0
+    /// The open conflicted file's stages and its resolution so far (`openFile` is a WIP file of kind `.conflicted`):
+    /// `.loading` in the same call as the click. Ticks and edits live here, so a tab switch keeps them.
+    private(set) var conflict: Loadable<ConflictDocument> = .idle
+    /// The conflict editor's write in flight ("Saving…"), which disables its buttons.
+    private(set) var conflictBusy: String?
+    /// The conflict editor's last failed write, shown in its header card.
+    var conflictError: String?
+
     private static let logger = Logger(subsystem: "com.math2it.histq", category: "repo")
 
     /// What every read needs: the tab's runner, the base environment, the repo's folders.
@@ -315,6 +354,16 @@ final class RepoSession: Identifiable {
                 await RepoMenus.debugRun(spec, session: self)
             }
         }
+        // `-HistqOperation`: the operation banner's buttons on a fixture copy, once the state is read.
+        if let step = AppState.launchFlag("-HistqOperation") {
+            Task { [weak self] in
+                for _ in 0..<100 {
+                    if self?.status.value != nil, self?.repoState?.isOperationInProgress == true { break }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                self?.runLaunchOperation(step)
+            }
+        }
         #endif
     }
 
@@ -322,6 +371,7 @@ final class RepoSession: Identifiable {
         // A window closing drops its sessions without `close()`.
         watcher.stop()
         detailTask?.cancel()
+        fileTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
         setUpTask?.cancel()
@@ -331,6 +381,7 @@ final class RepoSession: Identifiable {
     func close() {
         watcher.stop()
         detailTask?.cancel()
+        fileTask?.cancel()
         refreshTask?.cancel()
         logTask?.cancel()
         setUpTask?.cancel()
@@ -342,6 +393,8 @@ final class RepoSession: Identifiable {
     /// the same frame as the click. The load runs in a task that a newer select cancels. Selecting the current
     /// selection again (a tab switch) reloads it.
     func select(_ selection: Selection) {
+        // Another row (a parent jump, a vanished WIP) shows the graph again; a tab switch keeps the open file.
+        if selection != self.selection { closeFile() }
         self.selection = selection
         selectToken &+= 1
         selectDetail = timingDetail(selection)
@@ -356,6 +409,7 @@ final class RepoSession: Identifiable {
     /// Selects graph rows: the path a click in the graph takes (and `-HistqSelect wip|commit:<sha>`, a parent
     /// jump). One row shows its detail, several a count; none keeps the detail as it is.
     func selectGraph(_ items: [GraphItem]) {
+        closeFile()
         graphSelection = items
         guard let first = items.first else { return }
         let selection: Selection
@@ -473,6 +527,7 @@ final class RepoSession: Identifiable {
     /// commit) in the same call; the graph scrolls that row into view. Before the refs are read (a launch request), the
     /// detail shows the commit placeholder at once and jumps once they are in (`Selection.ref`).
     func selectRef(_ item: SidebarItem) {
+        closeFile()
         selectSidebarItem(item)
         guard let refs = refs.value else { return select(.ref(item)) }
         if let commit = Self.resolve(item, in: refs)?.1 { selectGraph([.commit(commit)]) }
@@ -568,10 +623,23 @@ final class RepoSession: Identifiable {
     /// when cancelled, so nothing stale is published.
     private func readStatusAndRefs(_ backend: Backend, scope: RefreshScope) async throws -> Bool {
         guard scope.contains(.status) || scope.contains(.refs) else { return false }
-        let (newStatus, newRefs, newStashes, newRemotes) = try await Self.read(
+        let (newStatus, newState, newRefs, newStashes, newRemotes) = try await Self.read(
             backend, cwd: url, status: scope.contains(.status), refs: scope.contains(.refs))
         try Task.checkCancellation()
-        if let newStatus { status = .loaded(newStatus) }
+        if let newState, newState != repoState { repoState = newState }
+        if let newStatus {
+            status = .loaded(newStatus)
+            if let target = openFile, target.source == .wip {
+                if target.isConflict {
+                    // The conflict editor keeps its ticks and edits; it closes once the path is resolved (its Save, the
+                    // merge tool, a `git add` in a terminal).
+                    if !newStatus.conflicted.contains(where: { $0.path == target.path }) { closeFile() }
+                } else {
+                    // A stage, a discard or an edit changed the open WIP file: its diff follows without a placeholder.
+                    loadFile(quietly: true)
+                }
+            }
+        }
         if let newStashes { stashes = newStashes }
         if let newRemotes, newRemotes != remotes { remotes = newRemotes }
         var moved = false
@@ -608,17 +676,19 @@ final class RepoSession: Identifiable {
 
     @concurrent
     private nonisolated static func read(_ backend: Backend, cwd: URL, status: Bool, refs: Bool) async throws
-        -> (WorkingStatus?, Refs?, [Stash]?, [RemoteInfo]?)
+        -> (WorkingStatus?, RepoState?, Refs?, [Stash]?, [RemoteInfo]?)
     {
         let env = try await backend.readEnvironment(cwd: cwd)
         async let newStatus = status ? StatusReader.read(runner: backend.runner, cwd: cwd, env: env) : nil
+        // The banner is secondary: a state that cannot be read keeps the last one rather than failing the status.
+        async let newState = status ? (try? await RepoState.read(runner: backend.runner, cwd: cwd, env: env)) : nil
         async let newRefs = refs ? RefReader.read(runner: backend.runner, cwd: cwd, env: env) : nil
         // `refs/stash` is a ref: the watcher reports a stash change as `.refs`.
         async let newStashes = refs ? StashWorktreeReader.stashes(runner: backend.runner, cwd: cwd, env: env) : nil
         // The remotes live in the config, which the watcher does not follow: read with every refs read (each write
         // rereads the refs).
         async let newRemotes = refs ? readRemotes(backend, cwd: cwd, env: env) : nil
-        return (try await newStatus, try await newRefs, try await newStashes, try await newRemotes)
+        return (try await newStatus, await newState, try await newRefs, try await newStashes, try await newRemotes)
     }
 
     /// `git remote -v`: each remote's fetch URL, in git's order.
@@ -702,6 +772,573 @@ final class RepoSession: Identifiable {
         try Task.checkCancellation()
         snapshot.isComplete = true
         return snapshot
+    }
+
+    // MARK: File diff
+
+    /// Files over this size (any side of the diff) show a "Load anyway" card instead of their diff.
+    nonisolated static let fileSizeLimit = 2 * 1024 * 1024
+    /// The context of a "Full file" diff: more lines than any file has, so its one hunk is the whole file.
+    private nonisolated static let fullFileContext = 10_000_000
+
+    /// The timing log's detail of the open file (`file src/app.swift`, `conflict long.txt`).
+    var fileDetail: String { openFile.map(fileDetail) ?? "" }
+
+    /// Shows `target`'s diff in panel2 instead of the graph now: `fileDiff` is `.loading` when this returns, so the
+    /// placeholder shows in the click's frame. The diff loads in a task that a newer select cancels.
+    /// A conflicted WIP file opens the conflict editor instead of a diff (`FileTarget.isConflict`).
+    func selectFile(_ target: FileTarget) {
+        UITiming.select(fileDetail(target))
+        openFile = target
+        fileIgnoresSizeLimit = false
+        startFileLoad()
+    }
+
+    /// Opens a WIP file by its path (DEBUG `-HistqSelect file:<path>`) as its row in the WIP panel would: an
+    /// untracked file as untracked, a file with unstaged changes as its Unstaged row, else as its Staged row.
+    func selectWIPFile(_ path: String) {
+        let file: FileChange = switch status.value?.entries.first(where: { $0.path == path }) {
+        case let entry? where entry.kind == .untracked: FileChange(kind: .untracked, path: path)
+        case let entry? where entry.kind == .unmerged: FileChange(kind: .conflicted, path: path)
+        case let entry? where entry.isUnstaged: FileChange(letter: entry.worktree.rawValue, path: path)
+        case let entry?: FileChange(letter: entry.index.rawValue, path: path, originalPath: entry.originalPath)
+        case nil: FileChange(kind: .modified, path: path)
+        }
+        selectFile(FileTarget(source: .wip, file: file))
+    }
+
+    /// Shows the graph again (Esc, the back button, the conflict editor's close, another graph row or sidebar ref).
+    /// The conflict editor's unsaved ticks and edits go with it.
+    func closeFile() {
+        guard openFile != nil else { return }
+        fileTask?.cancel()
+        fileTask = nil
+        openFile = nil
+        fileDiff = .idle
+        conflict = .idle
+        conflictBusy = nil
+        conflictError = nil
+    }
+
+    /// Loads the open file past the size limit: its card's "Load anyway".
+    func loadFileAnyway() {
+        guard openFile != nil else { return }
+        fileIgnoresSizeLimit = true
+        startFileLoad()
+    }
+
+    /// Stages, unstages or discards `lines` of `file` (the diff a table shows, so the patch matches what the user
+    /// selected) through the write path. Discarding asks first: the working tree loses those lines.
+    func apply(_ action: PatchBuilder.Action, lines: Set<DiffLineID>, of file: FileDiff) {
+        let patch: Data
+        do {
+            patch = try PatchBuilder.patch(for: file, selecting: lines, action: action)
+        } catch {
+            Self.logger.error("no patch for \(file.path, privacy: .public): \(String(describing: error), privacy: .public)")
+            return
+        }
+        let count = lines.count { id in
+            file.hunks.indices.contains(id.hunk) && file.hunks[id.hunk].lines.indices.contains(id.line)
+                && file.hunks[id.hunk].lines[id.line].isChange
+        }
+        let what = count == 1 ? "1 line" : "\(count) lines"
+        let name = (file.path as NSString).lastPathComponent
+        switch action {
+        case .stage:
+            run(.applyPatch(patch, .stage), title: "Stage \(what) of \(name)")
+        case .unstage:
+            run(.applyPatch(patch, .unstage), title: "Unstage \(what) of \(name)")
+        case .discard:
+            confirm("Discard \(what) of \(name)?", message: "This cannot be undone.", button: "Discard",
+                    write: .applyPatch(patch, .discard), operation: "Discard \(what) of \(name)")
+        }
+    }
+
+    private func fileDetail(_ target: FileTarget) -> String {
+        target.isConflict ? "conflict \(target.path)" : "file \(target.path)"
+    }
+
+    private func startFileLoad() {
+        fileToken &+= 1
+        if openFile?.isConflict == true {
+            conflict = .loading
+            conflictBusy = nil
+            conflictError = nil
+            return loadConflict()
+        }
+        fileDiff = .loading
+        loadFile(quietly: false)
+    }
+
+    /// Reads the open file's diff off the main actor. A quiet load (after a status change) keeps the diff on screen
+    /// until the new one is in, and goes back to the graph when the file no longer has a change.
+    private func loadFile(quietly: Bool) {
+        guard let target = openFile else { return }
+        // Quiet only over a loaded diff: during the first load the placeholder stays and this load takes its place.
+        let quietly = quietly && fileDiff.value != nil
+        fileTask?.cancel()
+        let token = fileToken
+        let ignoresSizeLimit = fileIgnoresSizeLimit
+        fileLoadCount &+= 1
+        let loadID = fileLoadCount
+        fileTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let backend = try await backend()
+                let loaded = try await Self.readFileDiff(
+                    backend, cwd: url, target: target, ignoresSizeLimit: ignoresSizeLimit, loadID: loadID)
+                try Task.checkCancellation()
+                guard token == fileToken, openFile == target else { return }
+                if quietly, case .unchanged = loaded.content { return closeFile() }
+                fileDiff = .loaded(loaded)
+            } catch {
+                guard token == fileToken, openFile == target, !Self.isCancellation(error) else { return }
+                // A failed quiet reload keeps the diff on screen; the next status change tries again.
+                if !quietly { fileDiff = .failed(Self.message(for: error)) }
+            }
+        }
+    }
+
+    /// The diff of `target` with the read environment (no textconv, no external diff, no filters), off the main actor:
+    /// a WIP file's unstaged and staged changes, or a commit's changes against its first parent. Each comes twice, with
+    /// git's context (Diff mode) and with the whole file as context (Full file mode, and the syntax state of every
+    /// line). Untracked files are read from disk.
+    @concurrent
+    private nonisolated static func readFileDiff(
+        _ backend: Backend, cwd: URL, target: FileTarget, ignoresSizeLimit: Bool, loadID: Int
+    ) async throws -> FileDiffDetail {
+        if case .commit(let hash) = target.source, !GitOperations.isObjectID(hash) {
+            throw CommitReadError.notACommit(hash)
+        }
+        let env = try await backend.readEnvironment(cwd: cwd)
+        let runner = backend.runner
+        let file = target.file
+        let language = LanguageTable.language(forPath: file.path)
+        if !ignoresSizeLimit {
+            let size = await largestSize(of: target, runner: runner, cwd: cwd, env: env)
+            if size > fileSizeLimit { return FileDiffDetail(loadID: loadID, content: .tooLarge(size)) }
+        }
+        let paths = [file.originalPath, file.path].compactMap { $0 }
+        let full = fullFileContext
+        switch target.source {
+        case .wip where file.kind == .untracked:
+            return FileDiffDetail(loadID: loadID, content: try untrackedContent(file.path, cwd: cwd, language: language))
+        case .wip:
+            async let unstaged = DiffReader.unstaged(runner: runner, cwd: cwd, env: env, paths: [file.path])
+            async let unstagedFull = DiffReader.unstaged(
+                runner: runner, cwd: cwd, env: env, paths: [file.path], context: full)
+            async let staged = DiffReader.staged(runner: runner, cwd: cwd, env: env, paths: paths)
+            async let stagedFull = DiffReader.staged(runner: runner, cwd: cwd, env: env, paths: paths, context: full)
+            let sections = [
+                DiffSection(side: .unstaged, diff: pick(try await unstaged, file), full: pick(try await unstagedFull, file),
+                            language: language),
+                DiffSection(side: .staged, diff: pick(try await staged, file), full: pick(try await stagedFull, file),
+                            language: language),
+            ]
+            return FileDiffDetail(loadID: loadID, sections: sections.compactMap { $0 })
+        case .commit(let hash):
+            // A stash's untracked file is only in its untracked-files commit (a root commit: every line added).
+            let revision = file.kind == .untracked ? "\(hash)^3" : hash
+            async let diff = DiffReader.commit(revision, runner: runner, cwd: cwd, env: env, paths: paths)
+            async let diffFull = DiffReader.commit(
+                revision, runner: runner, cwd: cwd, env: env, paths: paths, context: full)
+            let section = DiffSection(side: .commit, diff: pick(try await diff, file), full: pick(try await diffFull, file),
+                                      language: language)
+            return FileDiffDetail(loadID: loadID, sections: [section].compactMap { $0 })
+        }
+    }
+
+    /// The diff of `file` among those git printed for its paths (a rename's old path is in the pathspec too).
+    private nonisolated static func pick(_ diffs: [FileDiff], _ file: FileChange) -> FileDiff? {
+        diffs.first { $0.path == file.path || $0.oldPath == file.path } ?? diffs.first
+    }
+
+    /// The largest size of the file on any side its diff reads: for a WIP file the working tree (the entry itself,
+    /// never a symlink's target), the index and HEAD; for a commit, the commit and its first parent. A side that does
+    /// not exist counts as 0.
+    private nonisolated static func largestSize(
+        of target: FileTarget, runner: GitRunner, cwd: URL, env: [String: String]
+    ) async -> Int {
+        let file = target.file
+        let oldPath = file.originalPath ?? file.path
+        var size = 0
+        let objects: [String]
+        switch target.source {
+        case .wip:
+            let attributes = try? FileManager.default.attributesOfItem(
+                atPath: cwd.appending(path: file.path, directoryHint: .notDirectory).path)
+            size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+            objects = [":0:\(file.path)", "HEAD:\(oldPath)"]
+        case .commit(let hash):
+            objects = file.kind == .untracked
+                ? ["\(hash)^3:\(file.path)"] : ["\(hash):\(file.path)", "\(hash)^:\(oldPath)"]
+        }
+        for object in objects {
+            // Exit 128: no such object on that side (an added file, a root commit, an unborn branch).
+            guard let result = try? await runner.run(
+                ["cat-file", "-s", object], cwd: cwd, env: env, allowedExitCodes: [0, 128]),
+                result.exitCode == 0,
+                let bytes = Int(result.text.trimmingCharacters(in: .whitespacesAndNewlines))
+            else { continue }
+            size = max(size, bytes)
+        }
+        return size
+    }
+
+    /// An untracked file has no git diff: its lines read from disk, all added (display only). The entry is opened
+    /// without following a symlink and without blocking, and only a regular file is read, so a planted link or FIFO
+    /// cannot point the read at a device; a symlink shows its target, which is what git would stage.
+    private nonisolated static func untrackedContent(_ path: String, cwd: URL, language: Language?) throws
+        -> FileDiffDetail.Content
+    {
+        let fullPath = cwd.appending(path: path, directoryHint: .notDirectory).path
+        let data: Data
+        let fd = open(fullPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        if fd >= 0 {
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            var info = stat()
+            guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return .unchanged }
+            data = try handle.readToEnd() ?? Data()
+        } else if errno == ELOOP {
+            data = Data(try FileManager.default.destinationOfSymbolicLink(atPath: fullPath).utf8)
+        } else {
+            throw CocoaError(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: fullPath])
+        }
+        // git's own test: a NUL in the first 8000 bytes makes a file binary.
+        if data.prefix(8000).contains(0) { return .binary }
+        return .sections([DiffSection(untracked: data, language: language)])
+    }
+
+    // MARK: Conflict editor
+
+    /// Opens the conflict editor on a conflicted WIP path (DEBUG `-HistqSelect conflict:<path>`) as a click on its row
+    /// in the WIP panel does: through `selectFile`, so panel2 shows its placeholder in the same call.
+    func selectConflict(_ path: String) {
+        selectFile(FileTarget(source: .wip, file: FileChange(kind: .conflicted, path: path)))
+    }
+
+    /// Reads the open conflicted file's stages off the main actor (read environment) and builds its 3-way merge.
+    private func loadConflict() {
+        guard let target = openFile else { return }
+        fileTask?.cancel()
+        let token = fileToken
+        fileLoadCount &+= 1
+        let loadID = fileLoadCount
+        fileTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let backend = try await backend()
+                let loaded = try await Self.readConflict(backend, cwd: url, path: target.path, loadID: loadID)
+                try Task.checkCancellation()
+                guard token == fileToken, openFile == target else { return }
+                conflict = .loaded(loaded)
+                #if DEBUG
+                runLaunchResolve()
+                #endif
+            } catch {
+                guard token == fileToken, openFile == target, !Self.isCancellation(error) else { return }
+                conflict = .failed(Self.message(for: error))
+            }
+        }
+    }
+
+    /// The stages of `path` (`ConflictSource.load`), the pane labels of the operation in progress and the short hashes
+    /// of the commits A and B come from: HEAD, and the merged, replayed, picked or reverted commit. The merge itself
+    /// is built here too, off the main actor.
+    @concurrent
+    private nonisolated static func readConflict(_ backend: Backend, cwd: URL, path: String, loadID: Int) async throws
+        -> ConflictDocument
+    {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        let runner = backend.runner
+        let state = try await RepoState.read(runner: runner, cwd: cwd, env: env)
+        let incoming: String? = switch state.operation {
+        case .merge: "MERGE_HEAD"
+        case .rebase: "REBASE_HEAD"
+        case .cherryPick: "CHERRY_PICK_HEAD"
+        case .revert: "REVERT_HEAD"
+        case .none: nil
+        }
+        async let source = ConflictSource.load(path: path, labels: state.labels, runner: runner, cwd: cwd, env: env)
+        async let aCommit = shortHash("HEAD", runner: runner, cwd: cwd, env: env)
+        async let bCommit = incoming == nil ? nil : shortHash(incoming ?? "", runner: runner, cwd: cwd, env: env)
+        return ConflictDocument(loadID: loadID, source: try await source, aCommit: try await aCommit,
+                                bCommit: try await bCommit)
+    }
+
+    /// The short hash of the commit a fixed pseudo-ref (`HEAD`, `MERGE_HEAD`) names; nil when it does not exist.
+    private nonisolated static func shortHash(
+        _ name: String, runner: GitRunner, cwd: URL, env: [String: String]
+    ) async throws -> String? {
+        let result = try await runner.run(
+            ["rev-parse", "-q", "--short", "--verify", "\(name)^{commit}"], cwd: cwd, env: env, allowedExitCodes: [0, 1])
+        let hash = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.exitCode == 0 && !hash.isEmpty ? hash : nil
+    }
+
+    /// Changes the loaded conflict's merge and tells the panes (`revision`).
+    private func updateConflict(_ change: (inout ConflictDocument) -> Void) {
+        guard case .loaded(var document) = conflict, document.merge != nil else { return }
+        change(&document)
+        document.revision &+= 1
+        conflict = .loaded(document)
+    }
+
+    /// A line checkbox of pane A or B: ticks or unticks those lines (indices in that pane).
+    func setConflictTicked(_ ticked: Bool, side: ThreeWayMerge.Side, lines: [Int]) {
+        updateConflict { $0.merge?.setTicked(ticked, side: side, lines: lines) }
+    }
+
+    /// A hunk checkbox: every line of one side of conflict `k` (0-based); "conflict k of N" follows it.
+    func setConflictTicked(_ ticked: Bool, side: ThreeWayMerge.Side, conflict k: Int) {
+        updateConflict { document in
+            guard let merge = document.merge, merge.conflictRegions.indices.contains(k) else { return }
+            document.merge?.setTicked(ticked, side: side, conflict: k)
+            document.current = k
+        }
+    }
+
+    /// A pane header's checkbox: every conflict line of one side.
+    func setConflictTickedAll(_ ticked: Bool, side: ThreeWayMerge.Side) {
+        updateConflict { $0.merge?.setTickedAll(ticked, side: side) }
+    }
+
+    /// The user typed in Output: `text` becomes the manual edit of the first region of `regions`, and the other regions
+    /// the edit swallowed become empty. Only regions the edit touched are changed. Returns the new merge, so Output can
+    /// match it at once (the merge adds back a line break the edit removed between two regions).
+    func editConflictOutput(_ text: String, regions: ClosedRange<Int>) -> ThreeWayMerge? {
+        updateConflict { document in
+            guard let merge = document.merge, merge.regions.indices.contains(regions.upperBound) else { return }
+            document.merge?.setManualText(text, region: regions.lowerBound)
+            for index in regions.dropFirst() { document.merge?.setManualText("", region: index) }
+        }
+        return conflict.value?.merge
+    }
+
+    /// "conflict k of N": the conflict the ▲ ▼ buttons moved to (0-based).
+    func showConflict(_ k: Int) {
+        guard case .loaded(var document) = conflict, let merge = document.merge,
+              merge.conflictRegions.indices.contains(k)
+        else { return }
+        document.current = k
+        conflict = .loaded(document)
+    }
+
+    /// Save: writes Output's bytes to the file, then `git add`. Only once every conflict is resolved.
+    func saveConflict() {
+        guard let merge = conflict.value?.merge, merge.unresolvedCount == 0 else { return }
+        resolveConflict(keeping: merge.outputData, title: "Saving…")
+    }
+
+    /// Resolves the open conflicted file with `content` (Output, the version a chooser keeps), or deletes it when nil,
+    /// through the write path; the status refresh after it closes the editor once git no longer lists the path.
+    func resolveConflict(keeping content: Data?, title: String) {
+        guard let target = openFile, target.isConflict, conflictBusy == nil else { return }
+        conflictBusy = title
+        conflictError = nil
+        let token = fileToken
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await perform(.resolveConflict(path: target.path, content: content))
+            } catch {
+                guard token == fileToken else { return }
+                conflictError = Self.message(for: error)
+            }
+            if token == fileToken { conflictBusy = nil }
+        }
+    }
+
+    /// "Open in external merge tool": `git mergetool --no-prompt [--tool=<PrefKey.mergeTool>] -- <path>` with the write
+    /// environment, as an operation (the action bar shows it running, its failure goes to the error banner). A tool
+    /// name that is not a plain name is refused rather than passed to git.
+    func openMergeTool() {
+        guard let target = openFile, target.isConflict else { return }
+        let setting = (Preferences.defaults.string(forKey: PrefKey.mergeTool.rawValue) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        let isPlainName = (setting.first.map { $0.isLetter || $0.isNumber } ?? true)
+            && setting.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
+        guard isPlainName else {
+            conflictError = "The merge tool setting \"\(setting)\" is not a tool name."
+            return
+        }
+        conflictError = nil
+        let name = (target.path as NSString).lastPathComponent
+        run(.mergeTool(path: target.path, tool: setting.isEmpty ? nil : setting), title: "Merge tool for \(name)")
+    }
+
+    /// Writes a resolution into the working tree: atomically (a temporary file renamed over the old one, so a crash
+    /// never leaves half a file and a symlink is replaced, not followed), keeping the old file's permissions. nil
+    /// deletes the file. `path` must stay inside `cwd`: no absolute path, no `..`, no folder that is a symlink out.
+    private nonisolated static func writeResolution(_ content: Data?, to path: String, cwd: URL) throws {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !path.isEmpty, !path.hasPrefix("/"), !parts.contains(where: { $0 == ".." || $0 == "." || $0.isEmpty }) else {
+            throw ConflictWriteError.outsideRepository(path)
+        }
+        let file = cwd.appending(path: path, directoryHint: .notDirectory)
+        let root = cwd.resolvingSymlinksInPath().path
+        let folder = file.deletingLastPathComponent().resolvingSymlinksInPath().path
+        guard folder == root || folder.hasPrefix(root + "/") else { throw ConflictWriteError.outsideRepository(path) }
+        let fm = FileManager.default
+        let attributes = try? fm.attributesOfItem(atPath: file.path)
+        guard let content else {
+            if attributes != nil { try fm.removeItem(at: file) }
+            return
+        }
+        if attributes == nil { try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true) }
+        try content.write(to: file, options: .atomic)
+        if attributes?[.type] as? FileAttributeType == .typeRegular, let mode = attributes?[.posixPermissions] {
+            try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
+        }
+    }
+
+    private enum ConflictWriteError: LocalizedError {
+        case outsideRepository(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .outsideRepository(let path): "\(path) is not a file inside this repository."
+            }
+        }
+    }
+
+    #if DEBUG
+    /// Whether `-HistqResolve` already ran in this launch.
+    private static var launchResolveDone = false
+
+    /// DEBUG `-HistqResolve A1,B2,AB3[,save]`: once, when the first conflict loads, ticks the named sides of conflict k
+    /// (1-based) through the hunk checkboxes' path, then presses Save when `save` is listed. `keep` or `delete` presses
+    /// the modify/delete chooser's Keep File or Delete File instead. A short wait lets the editor show first.
+    private func runLaunchResolve() {
+        guard !Self.launchResolveDone, let spec = AppState.launchFlag("-HistqResolve") else { return }
+        Self.launchResolveDone = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self else { return }
+            var save = false
+            for item in spec.split(separator: ",") {
+                if item == "save" {
+                    save = true
+                    continue
+                }
+                if item == "keep" || item == "delete" {
+                    guard case .modifyDelete(_, let a, let b)? = conflict.value?.source.content else {
+                        Self.logger.error("-HistqResolve: \(item, privacy: .public) needs a modify/delete conflict")
+                        return
+                    }
+                    return resolveConflict(keeping: item == "keep" ? a ?? b : nil,
+                                           title: item == "keep" ? "Keeping…" : "Deleting…")
+                }
+                let sides = item.prefix { $0 == "A" || $0 == "B" }
+                guard let k = Int(item.dropFirst(sides.count)), k >= 1 else {
+                    Self.logger.error("-HistqResolve: bad item \(item, privacy: .public)")
+                    return
+                }
+                if sides.contains("A") { setConflictTicked(true, side: .a, conflict: k - 1) }
+                if sides.contains("B") { setConflictTicked(true, side: .b, conflict: k - 1) }
+            }
+            if save { saveConflict() }
+        }
+    }
+    #endif
+
+    // MARK: Operation in progress
+
+    /// A button of the operation banner.
+    enum OperationStep: Sendable {
+        case `continue`, abort, skip
+    }
+
+    /// The running operation's title of `step` ("Continue Merge", "Abort Rebase", "Skip Commit"): the banner finds its
+    /// step in `running` by it, also when the step started from a confirmation.
+    static func title(of step: OperationStep, _ operation: RepoState.Operation) -> String {
+        let name = switch operation {
+        case .merge: "Merge"
+        case .rebase: "Rebase"
+        case .cherryPick: "Cherry-pick"
+        case .revert: "Revert"
+        case .none: "Operation"
+        }
+        return switch step {
+        case .continue: "Continue \(name)"
+        case .abort: "Abort \(name)"
+        case .skip: "Skip Commit"
+        }
+    }
+
+    /// Whether one of the banner's steps is running: its buttons wait, so a second click cannot start another.
+    var isOperationStepRunning: Bool {
+        guard let operation = repoState?.operation, operation != .none else { return false }
+        let titles = [OperationStep.continue, .abort, .skip].map { Self.title(of: $0, operation) }
+        return running.contains { titles.contains($0.title) }
+    }
+
+    /// Continue needs an operation in progress and no file left with a conflict (git refuses otherwise).
+    var canContinueOperation: Bool {
+        guard repoState?.isOperationInProgress == true, let status = status.value else { return false }
+        return status.conflicted.isEmpty && !isOperationStepRunning
+    }
+
+    /// The banner's Continue: commits the resolution (a merge, cherry-pick or revert) or goes on with the next commit
+    /// of a rebase, which may stop on new conflicts. The status read after it updates the banner.
+    func continueOperation() {
+        guard canContinueOperation, let operation = repoState?.operation else { return }
+        run(.continueOperation(operation), title: Self.title(of: .continue, operation))
+    }
+
+    /// The banner's Abort, after a confirmation: the branch, the index and the files go back to before the operation,
+    /// and the resolutions made so far are lost.
+    func abortOperation() {
+        guard let operation = repoState?.operation, operation != .none, !isOperationStepRunning else { return }
+        let noun = Self.title(of: .abort, operation).dropFirst("Abort ".count).lowercased()
+        confirm("Abort the \(noun)?",
+                message: "The branch and the working tree go back to how they were before the \(noun). The conflicts "
+                    + "resolved so far are lost.",
+                button: Self.title(of: .abort, operation), write: .abortOperation(operation),
+                operation: Self.title(of: .abort, operation))
+    }
+
+    /// The banner's Skip (a rebase only), after a confirmation: the commit being replayed is left out of the branch.
+    func skipOperation() {
+        guard repoState?.operation == .rebase, !isOperationStepRunning else { return }
+        confirm("Skip this commit?", message: "The rebased branch will not have its changes.", button: "Skip Commit",
+                write: .skipOperation(.rebase), operation: Self.title(of: .skip, .rebase))
+    }
+
+    #if DEBUG
+    /// DEBUG `-HistqOperation continue|abort|skip`: once the status and the operation in progress are read, presses the
+    /// banner's button through the same method; a confirmation is accepted as the user would.
+    private func runLaunchOperation(_ step: String) {
+        switch step {
+        case "continue":
+            if !canContinueOperation { Self.logger.error("-HistqOperation continue: Continue is disabled") }
+            continueOperation()
+        case "abort": abortOperation()
+        case "skip": skipOperation()
+        default: Self.logger.error("-HistqOperation: unknown step \(step, privacy: .public)")
+        }
+        if let confirmation {
+            self.confirmation = nil
+            run(confirmation.write, title: confirmation.operation, key: confirmation.key)
+        }
+    }
+    #endif
+
+    /// "Checkout this version" of a commit's file (its diff header): `git checkout <commit> -- <path>` through the write
+    /// path, after a confirmation that says what the working tree loses. A stash's untracked file comes from the
+    /// stash's untracked-files commit.
+    func checkoutVersion(of target: FileTarget) {
+        guard case .commit(let hash) = target.source, target.file.kind != .deleted else { return }
+        let file = target.file
+        let revision = file.kind == .untracked ? "\(hash)^3" : hash
+        let short = String(hash.prefix(7))
+        let isChanged = status.value?.entries.contains { $0.path == file.path } ?? false
+        confirm("Replace \(file.name) with its version from \(short)?",
+                message: isChanged
+                    ? "Its staged and unstaged changes are lost."
+                    : "The file in the working tree and the index becomes this version.",
+                button: "Checkout This Version", write: .checkoutFiles([file.path], from: revision),
+                operation: "Checkout \(file.name) from \(short)", isDestructive: isChanged)
     }
 
     // MARK: Commit detail
@@ -816,6 +1453,11 @@ final class RepoSession: Identifiable {
         case .discardAll(let includingUntracked): try await ops.discardAll(includingUntracked: includingUntracked)
         case .commit(let message): try await ops.commit(message: message)
         case .amend(let message): try await ops.amend(message: message)
+        case .applyPatch(let patch, let action):
+            // `apply` takes the runner's write lane itself, like the operations.
+            try await PatchBuilder.apply(
+                patch, action: action, runner: backend.runner, cwd: cwd,
+                env: GitInvocation.environment(profile: nil, base: base))
 
         case .checkoutBranch(let name): try await ops.checkout(branch: name)
         case .checkoutTracking(let remoteBranch, let localName):
@@ -863,6 +1505,20 @@ final class RepoSession: Identifiable {
         case .createTag(let name, let revision, let message):
             try await ops.createTag(name, at: revision, message: message)
         case .deleteTag(let name): try await ops.deleteTag(name)
+
+        case .resolveConflict(let path, let content):
+            try writeResolution(content, to: path, cwd: cwd)
+            try await ops.stage([path])
+        case .mergeTool(let path, let tool):
+            let env = GitInvocation.environment(profile: nil, base: base)
+            let runner = backend.runner
+            let args = ["--literal-pathspecs", "mergetool", "--no-prompt"] + (tool.map { ["--tool=\($0)"] } ?? [])
+                + ["--", path]
+            _ = try await runner.mutate { try await runner.run(args, cwd: cwd, env: env) }
+
+        case .continueOperation(let operation): try await ops.continueOperation(operation)
+        case .abortOperation(let operation): try await ops.abortOperation(operation)
+        case .skipOperation(let operation): try await ops.skipOperation(operation)
         }
     }
 
@@ -1078,6 +1734,10 @@ final class RepoSession: Identifiable {
             "This folder is not a git repository."
         case let error as GitError:
             error.stderrTail.isEmpty ? "git failed." : error.stderrTail
+        case DiffReadError.missingObjects:
+            "This file's contents are not downloaded yet (a partial clone): fetch to see them."
+        case ConflictSourceError.notConflicted:
+            "This file has no conflict left."
         case let error as GitOperationError:
             switch error {
             case .invalidBranchName(let name): "\"\(name)\" is not a valid branch name."

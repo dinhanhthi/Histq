@@ -24,12 +24,20 @@ struct CommitDetailPanel: View {
                                 // A stash's untracked files are not in its commit: no checkout from a stash.
                                 commit.isStash ? [] : RepoMenus.checkoutFile(file, commit: commit.hash, session: session)
                             }
+                            .onSelectFile(selected: openPath) { [session, commit] file in
+                                session.selectFile(FileTarget(source: .commit(commit.hash), file: file))
+                            }
                     }
                 } accessory: {
                     FileListModeToggle()
                 }
             }
         }
+    }
+
+    /// This commit's file whose diff panel2 shows, drawn as selected.
+    private var openPath: String? {
+        session.openFile?.source == .commit(commit.hash) ? session.openFile?.path : nil
     }
 }
 

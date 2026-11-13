@@ -1,5 +1,5 @@
-// The working tree in the detail panel, each part in its own card: the unstaged files (stage, discard), the staged
-// files (unstage), and the commit box (summary with a 72-character counter, description, Amend, Commit / ⌘↩).
+// The working tree in the detail panel, each part in its own card: the conflicted files (open the conflict editor,
+// stage), the unstaged files (stage, discard), the staged files (unstage), and the commit box (summary with a 72-character counter, description, Amend, Commit / ⌘↩).
 // Every write goes through `RepoSession.perform` (write environment, off the main actor); the control that started
 // it shows a spinner at once, and an error shows in its card.
 import HistqCore
@@ -29,16 +29,21 @@ struct WIPPanel: View {
     }
 
     fileprivate enum Part: Hashable {
-        case unstaged, staged, commit
+        case conflicted, unstaged, staged, commit
     }
 
     var body: some View {
         let status = session.status.value
+        let conflicted = status.map(Self.conflicted) ?? []
         let unstaged = status.map(Self.unstaged) ?? []
         let staged = status.map(Self.staged) ?? []
         VStack(spacing: SectionCardMetrics.spacing) {
             ScrollView {
                 VStack(spacing: SectionCardMetrics.spacing) {
+                    // During an operation the card stays once its files are resolved, saying nothing is left.
+                    if !conflicted.isEmpty || session.repoState?.isOperationInProgress == true {
+                        conflictedCard(conflicted)
+                    }
                     unstagedCard(unstaged)
                     stagedCard(staged)
                 }
@@ -58,6 +63,26 @@ struct WIPPanel: View {
 
     // MARK: Cards
 
+    /// The files git left with conflicts (a merge, rebase, cherry-pick, revert or stash pop): a click opens the conflict
+    /// editor in panel2 (`FileTarget.isConflict`); the button stages the file as it is, marking it resolved.
+    private func conflictedCard(_ files: [FileChange]) -> some View {
+        SectionCard("Conflicted", systemImage: "exclamationmark.triangle", count: files.count, contentPadding: 6) {
+            if files.isEmpty {
+                EmptyFilesText(text: "No conflicts left")
+            } else {
+                FileListView(files: files, repoURL: session.url) { file in
+                    rowButton("checkmark.circle", help: "Mark as Resolved (Stage File)", busy: .stage(file.path)) {
+                        run(.stage([file.path]), busy: .stage(file.path), part: .conflicted)
+                    }
+                }
+                .onSelectFile(selected: openWIPPath) { file in session.selectFile(FileTarget(source: .wip, file: file)) }
+            }
+            ErrorText(message: errors[.conflicted])
+        } accessory: {
+            FileListModeToggle()
+        }
+    }
+
     private func unstagedCard(_ files: [FileChange]) -> some View {
         SectionCard("Unstaged", systemImage: "doc.badge.ellipsis", count: files.count, contentPadding: 6) {
             if files.isEmpty {
@@ -65,15 +90,14 @@ struct WIPPanel: View {
             } else {
                 FileListView(files: files, repoURL: session.url) { file in
                     HStack(spacing: 10) {
-                        if file.kind != .conflicted {
-                            rowButton("arrow.uturn.backward", help: file.kind == .untracked ? "Delete File…" : "Discard Changes…",
-                                      busy: .discard(file.path)) { pendingDiscard = file }
-                        }
+                        rowButton("arrow.uturn.backward", help: file.kind == .untracked ? "Delete File…" : "Discard Changes…",
+                                  busy: .discard(file.path)) { pendingDiscard = file }
                         rowButton("plus.circle", help: "Stage File", busy: .stage(file.path)) {
                             run(.stage([file.path]), busy: .stage(file.path), part: .unstaged)
                         }
                     }
                 }
+                .onSelectFile(selected: openWIPPath) { file in session.selectFile(FileTarget(source: .wip, file: file)) }
             }
             ErrorText(message: errors[.unstaged])
         } accessory: {
@@ -98,6 +122,7 @@ struct WIPPanel: View {
                         run(.unstage(paths), busy: .unstage(file.path), part: .staged)
                     }
                 }
+                .onSelectFile(selected: openWIPPath) { file in session.selectFile(FileTarget(source: .wip, file: file)) }
             }
             ErrorText(message: errors[.staged])
         } accessory: {
@@ -143,6 +168,11 @@ struct WIPPanel: View {
         .disabled(disabled || busy.contains(key))
     }
 
+    /// The WIP file whose diff panel2 shows, drawn as selected in both lists.
+    private var openWIPPath: String? {
+        session.openFile?.source == .wip ? session.openFile?.path : nil
+    }
+
     // MARK: Writes
 
     /// Shows `key` busy now (the click's frame), then runs the write; its error goes to `part`'s card.
@@ -178,13 +208,17 @@ struct WIPPanel: View {
 
     // MARK: Files
 
-    /// Changes in the working tree, untracked files and conflicts (as the graph's WIP count).
+    /// Paths with unmerged index entries, in status order.
+    private static func conflicted(_ status: WorkingStatus) -> [FileChange] {
+        status.conflicted.map { FileChange(kind: .conflicted, path: $0.path) }
+    }
+
+    /// Changes in the working tree and untracked files (conflicts have their own card).
     private static func unstaged(_ status: WorkingStatus) -> [FileChange] {
         status.entries.compactMap { entry in
             switch entry.kind {
             case .untracked: FileChange(kind: .untracked, path: entry.path)
-            case .unmerged: FileChange(kind: .conflicted, path: entry.path)
-            case .ignored: nil
+            case .unmerged, .ignored: nil
             default: entry.isUnstaged ? FileChange(letter: entry.worktree.rawValue, path: entry.path) : nil
             }
         }
@@ -198,10 +232,18 @@ struct WIPPanel: View {
     }
 }
 
-/// The skeleton of the WIP panel: the same three cards with capsule rows.
+/// The skeleton of the WIP panel: the same cards with capsule rows (the Conflicted card when the last status had
+/// conflicts).
 struct WIPPlaceholder: View {
+    var hasConflicts = false
+
     var body: some View {
         VStack(spacing: SectionCardMetrics.spacing) {
+            if hasConflicts {
+                SectionCard("Conflicted", systemImage: "exclamationmark.triangle", countIsLoading: true, contentPadding: 6) {
+                    SkeletonFileRows(fractions: [0.45, 0.6])
+                }
+            }
             SectionCard("Unstaged", systemImage: "doc.badge.ellipsis", countIsLoading: true, contentPadding: 6) {
                 SkeletonFileRows(fractions: [0.55, 0.4, 0.65, 0.5])
             }

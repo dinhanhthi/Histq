@@ -188,7 +188,65 @@ final class WindowModel {
                 return
             }
             session.selectGraph([.commit(hash)])
-        case .file, .conflict, .pr:
+        case .file:
+            guard let session = selectedSession, let path = request.value else {
+                Self.logger.error("-HistqSelect file: no repo tab or no path")
+                return
+            }
+            // A WIP file is clicked in the WIP panel: the WIP first, then the file once that panel is on screen, so
+            // the `select file` line is timed like a user's click and not against the launch's first frames.
+            session.selectGraph([.wip])
+            Task { [weak session] in
+                for _ in 0..<150 {
+                    guard let session else { return }
+                    if session.detail.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                session?.selectWIPFile(path)
+            }
+        case .conflict:
+            guard let session = selectedSession, let path = request.value else {
+                Self.logger.error("-HistqSelect conflict: no repo tab or no path")
+                return
+            }
+            // As `file:`: a conflicted file is clicked in the WIP panel, so the WIP shows first and the
+            // `select conflict` line is timed like a user's click.
+            session.selectGraph([.wip])
+            Task { [weak session] in
+                for _ in 0..<150 {
+                    guard let session else { return }
+                    if session.detail.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                session?.selectConflict(path)
+            }
+        case .commitfile:
+            // `commitfile:<sha>:<path>`: a click on the commit's row, then on the file in its file list once the
+            // detail is on screen, with the `FileChange` that row holds.
+            let parts = request.value?.split(separator: ":", maxSplits: 1).map(String.init) ?? []
+            guard let session = selectedSession, parts.count == 2 else {
+                Self.logger.error("-HistqSelect commitfile: no repo tab or not <sha>:<path>")
+                return
+            }
+            session.selectGraph([.commit(parts[0])])
+            Task { [weak session] in
+                for _ in 0..<150 {
+                    guard let session else { return }
+                    if session.detail.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let session, case .commit(let commit)? = session.detail.value,
+                      let file = commit.files.first(where: { $0.path == parts[1] })
+                else {
+                    Self.logger.error("-HistqSelect commitfile: \(parts[1], privacy: .public) is not in that commit")
+                    return
+                }
+                session.selectFile(FileTarget(source: .commit(commit.hash), file: file))
+            }
+        case .pr:
             // The repo session's select path routes these once it exists.
             Self.logger.notice("-HistqSelect \(request.kind.rawValue, privacy: .public): not routed yet")
         }

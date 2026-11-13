@@ -1,5 +1,6 @@
 // A repo tab's three panels (Rex style: solid cards on the window glass with a small gap): the sidebar, the commit
-// graph, and the detail. The two gaps are draggable dividers; the
+// graph (or the open file's diff, or a conflicted file's conflict editor) under the operation banner while a merge,
+// rebase, cherry-pick or revert is in progress, and the detail. The two gaps are draggable dividers; the
 // side panels' widths are saved in `PrefKey.panelWidths`.
 import HistqCore
 import SwiftUI
@@ -101,11 +102,35 @@ struct RepoLayoutView: View {
             SidebarView(session: session)
                 .frame(width: widths.sidebar)
             divider(.sidebar, widths: widths, available: available)
-            CommitListPanel(session: session)
-                .frame(maxWidth: .infinity)
+            VStack(spacing: SectionCardMetrics.spacing) {
+                // Reads the operation itself, so a status read redraws the banner and not the panels.
+                OperationBanner(session: session)
+                panel2
+            }
+            .frame(maxWidth: .infinity)
             divider(.detail, widths: widths, available: available)
             DetailPanel(session: session)
                 .frame(width: widths.detail)
+        }
+    }
+
+    /// The graph, with the open file's diff or conflict editor over it.
+    private var panel2: some View {
+        ZStack {
+            // The graph stays mounted under an open file, so Esc brings it back as it was (scroll, selection)
+            // and opening a file costs no teardown in the click's frame.
+            let fileOpen = session.openFile != nil
+            CommitListPanel(session: session)
+                .opacity(fileOpen ? 0 : 1)
+                .allowsHitTesting(!fileOpen)
+                .accessibilityHidden(fileOpen)
+            if let target = session.openFile {
+                if target.isConflict {
+                    ConflictEditorView(session: session, target: target)
+                } else {
+                    DiffView(session: session, target: target)
+                }
+            }
         }
     }
 
@@ -256,7 +281,7 @@ private struct DetailPanel: View {
     @ViewBuilder private var placeholder: some View {
         switch session.selection {
         case .wip:
-            WIPPlaceholder()
+            WIPPlaceholder(hasConflicts: hasConflicts)
         case .commit, .stash, .ref:
             CommitDetailPlaceholder()
         case .multiple(let count):
@@ -265,9 +290,14 @@ private struct DetailPanel: View {
             if session.status.value?.entries.isEmpty == true {
                 CommitDetailPlaceholder()
             } else {
-                WIPPlaceholder()
+                WIPPlaceholder(hasConflicts: hasConflicts)
             }
         }
+    }
+
+    /// The last status had conflicted files: the WIP placeholder keeps the Conflicted card's place.
+    private var hasConflicts: Bool {
+        session.status.value?.conflicted.isEmpty == false
     }
 
     @ViewBuilder private func loaded(_ detail: RepoSession.Detail) -> some View {
