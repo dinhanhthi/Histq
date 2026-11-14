@@ -423,8 +423,60 @@ final class WindowModel {
                 session.selectFile(FileTarget(source: .commit(commit.hash), file: file))
             }
         case .pr:
-            // The repo session's select path routes these once it exists.
-            Self.logger.notice("-HistqSelect \(request.kind.rawValue, privacy: .public): not routed yet")
+            // `pr:<n>`: the PRs tab, then a click on the row once its lists and the tab's first detail are in (3 s at
+            // most; the placeholder shows whether the row is there or not), so the `select pr` line is timed like a
+            // user's click and not against the launch's first frames.
+            guard let session = selectedSession, let number = request.value.flatMap(Int.init) else {
+                Self.logger.error("-HistqSelect pr: no repo tab or no number")
+                return
+            }
+            session.selectSidebarTab(.prs)
+            Task { [weak session] in
+                for _ in 0..<150 {
+                    guard let session else { return }
+                    if session.github.isRead(.allOpen), session.detail.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let session else { return }
+                session.selectHosted(session.github.item(numbered: number))
+            }
+        case .issue:
+            // `issue:<n>`: as `pr:`, a click on the issue's row once the Issues list is in.
+            guard let session = selectedSession, let number = request.value.flatMap(Int.init) else {
+                Self.logger.error("-HistqSelect issue: no repo tab or no number")
+                return
+            }
+            session.selectSidebarTab(.prs)
+            Task { [weak session] in
+                for _ in 0..<150 {
+                    guard let session else { return }
+                    if session.github.isRead(.assigned), session.detail.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                session?.selectHosted(.issue(number))
+            }
+        case .prbadge:
+            // `prbadge:<remote branch>` (`origin/feature`): a click on that branch's pull request chip in the graph,
+            // once the graph and the badges are in; the chip's click calls the same `selectHosted`.
+            guard let session = selectedSession, let branch = request.value else {
+                Self.logger.error("-HistqSelect prbadge: no repo tab or no branch")
+                return
+            }
+            Task { [weak session] in
+                for _ in 0..<150 {
+                    guard let session else { return }
+                    if session.github.branchPullRequests[branch] != nil, session.detail.value != nil { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let session, let pull = session.github.branchPullRequests[branch] else {
+                    Self.logger.error("-HistqSelect prbadge: no open pull request on \(branch, privacy: .public)")
+                    return
+                }
+                session.selectHosted(.pullRequest(pull.number))
+            }
         }
     }
 }

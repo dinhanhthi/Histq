@@ -1,9 +1,9 @@
 // The repo's context menus, built once as `MenuEntry` lists and shown both by the graph (an `NSMenu`) and by the sidebar
 // and the file list (SwiftUI): the commit menu (checkout, create branch / tag here, cherry-pick, revert, reset,
 // interactive rebase from here, squash the selected commits, copy),
-// the WIP and stash menus, the branch, remote branch and tag menus, the Remote card's menus, the menu of a branch badge
-// dropped on another (merge, rebase, fast-forward), the worktree menus (open in a tab, add, remove, prune), checkout
-// file from a commit, and what a double-click checks out.
+// the WIP and stash menus, the branch, remote branch and tag menus (with Create Pull Request…), the Remote card's menus,
+// the menu of a branch badge dropped on another (merge, rebase, fast-forward, create a pull request), the worktree menus
+// (open in a tab, add, remove, prune), checkout file from a commit, and what a double-click checks out.
 // Every action goes through `RepoSession.run`; a destructive one asks `RepoSession.confirm` first, naming its target.
 import AppKit
 import HistqCore
@@ -273,9 +273,13 @@ enum RepoMenus {
                 },
             ]
         }
+        let pullReason = createPullRequestUnavailableReason(head: .local(name), base: nil, session)
         entries += [
             .separator,
             .action("Push \(name)", enabled: session.pushTarget(of: name) != nil) { session.push(branch: name) },
+            .action("Create Pull Request…", enabled: pullReason == nil, toolTip: pullReason) {
+                openCreatePullRequest(head: .local(name), base: nil, session)
+            },
             .submenu("Set Upstream", (refs?.remoteBranches ?? []).map { remote in
                 .action(remote.name, checked: branch?.upstream == remote.name) {
                     session.run(.setUpstream(branch: name, upstream: remote.name),
@@ -317,6 +321,13 @@ enum RepoMenus {
                     session.run(.rebase(onto: ref, checkoutFirst: nil), title: "Rebase \(current) onto \(name)")
                 },
             ]
+        }
+        // Only a branch of the GitHub remote can be a pull request's head.
+        if let branch, branch.remote == session.github.api?.remote {
+            let reason = createPullRequestUnavailableReason(head: .remote(name), base: nil, session)
+            entries += [.separator, .action("Create Pull Request…", enabled: reason == nil, toolTip: reason) {
+                openCreatePullRequest(head: .remote(name), base: nil, session)
+            }]
         }
         if let branch {
             entries += [.separator, deleteRemote(branch, session)]
@@ -488,7 +499,66 @@ enum RepoMenus {
                 session.run(.fastForward(targetName, to: sourceRef), title: "Fast-forward \(targetName) to \(sourceName)")
             })
         }
+        let pullReason = createPullRequestUnavailableReason(head: source, base: target, session)
+        entries += [
+            .separator,
+            .action("Create Pull Request from \(sourceName) into \(targetName)…", enabled: pullReason == nil,
+                    toolTip: pullReason) {
+                openCreatePullRequest(head: source, base: target, session)
+            },
+        ]
         return entries
+    }
+
+    // MARK: Pull requests
+
+    /// The branch on the tab's GitHub remote that `item` stands for, by its name there: a remote branch of that remote,
+    /// a local branch's upstream on it, or else the remote branch of the same name. nil when it is not on that remote
+    /// (or GitHub is not connected): GitHub opens a pull request only from a branch it has.
+    static func gitHubBranch(of item: SidebarItem, _ session: RepoSession) -> String? {
+        guard let remote = session.github.api?.remote, let refs = session.refs.value else { return nil }
+        let remoteBranches = refs.remoteBranches.filter { $0.remote == remote }
+        switch item {
+        case .local(let name):
+            let upstream = refs.localBranches.first { $0.name == name }?.upstream
+            let branch = remoteBranches.first { $0.name == upstream }
+                ?? remoteBranches.first { $0.name == "\(remote)/\(name)" }
+            return branch.map(localName(of:))
+        case .remote(let name):
+            return remoteBranches.first { $0.name == name }.map(localName(of:))
+        case .tag:
+            return nil
+        }
+    }
+
+    /// Why Create Pull Request… is disabled for `head` (into `base`, or the default branch): GitHub not connected, or a
+    /// branch that is not on the GitHub remote (push it first; Histq does not push from this menu). nil when it can run.
+    static func createPullRequestUnavailableReason(head: SidebarItem, base: SidebarItem?, _ session: RepoSession)
+        -> String?
+    {
+        guard let remote = session.github.api?.remote else {
+            return switch session.github.connection {
+            case .resolving: "GitHub is still connecting."
+            case .noRemote(let host): "No remote of this repository is on \(host)."
+            case .notConnected, .connected: "Connect a GitHub account to this tab's profile in Settings › Integrations."
+            }
+        }
+        guard let headName = head.branchName else { return "Only a branch can be a pull request's head." }
+        guard let headBranch = gitHubBranch(of: head, session) else {
+            return "Push \(headName) to \(remote) first: GitHub opens a pull request only from a branch it has."
+        }
+        guard let base else { return nil }
+        guard let baseBranch = gitHubBranch(of: base, session) else {
+            return "\(base.branchName ?? "The target") is not on \(remote): a pull request goes into a branch GitHub has."
+        }
+        return headBranch == baseBranch ? "Both are the same branch on \(remote)." : nil
+    }
+
+    /// Opens the Create Pull Request form for `head` (and `base`, else the default branch), by their names on the
+    /// GitHub remote.
+    static func openCreatePullRequest(head: SidebarItem, base: SidebarItem?, _ session: RepoSession) {
+        guard let headBranch = gitHubBranch(of: head, session) else { return }
+        session.pullRequestForm = PullRequestForm(head: headBranch, base: base.flatMap { gitHubBranch(of: $0, session) })
     }
 
     // MARK: Checkout

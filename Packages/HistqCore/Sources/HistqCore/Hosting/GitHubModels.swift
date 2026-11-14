@@ -26,6 +26,17 @@ public struct GitHubUser: Codable, Sendable, Equatable {
     }
 }
 
+/// A repository as `GET /repos/<owner>/<name>` returns it: only what a new pull request needs.
+public struct GitHubRepositoryInfo: Codable, Sendable, Equatable {
+    public var fullName: String?
+    public var defaultBranch: String
+
+    enum CodingKeys: String, CodingKey {
+        case fullName = "full_name"
+        case defaultBranch = "default_branch"
+    }
+}
+
 public struct GitHubLabel: Codable, Sendable, Equatable {
     public var name: String
     /// `RRGGBB` without `#`.
@@ -100,6 +111,8 @@ public struct GitHubIssue: Codable, Sendable, Equatable, Identifiable {
     public var closedAt: Date?
     /// Set when this "issue" is a pull request (GitHub's issue lists include them).
     public var pullRequest: PullRequestLink?
+    /// Only a pull request's search result has it (`GET /search/issues`).
+    public var draft: Bool?
 
     public struct PullRequestLink: Codable, Sendable, Equatable {
         public var url: String?
@@ -108,7 +121,7 @@ public struct GitHubIssue: Codable, Sendable, Equatable, Identifiable {
     public var isPullRequest: Bool { pullRequest != nil }
 
     enum CodingKeys: String, CodingKey {
-        case id, number, title, state, user, body, labels, assignees, comments
+        case id, number, title, state, user, body, labels, assignees, comments, draft
         case bodyHTML = "body_html"
         case htmlURL = "html_url"
         case createdAt = "created_at"
@@ -152,6 +165,72 @@ public struct GitHubReview: Codable, Sendable, Equatable, Identifiable {
         case bodyHTML = "body_html"
         case htmlURL = "html_url"
         case submittedAt = "submitted_at"
+    }
+}
+
+/// A commit of a pull request (`GET .../pulls/<n>/commits`).
+public struct GitHubCommit: Codable, Sendable, Equatable, Identifiable {
+    public var sha: String
+    public var htmlURL: String?
+    public var commit: Details
+    /// The GitHub account of the commit's author; nil when its email belongs to no account.
+    public var author: GitHubUser?
+
+    public var id: String { sha }
+
+    public struct Details: Codable, Sendable, Equatable {
+        public var message: String
+        public var author: Signature?
+    }
+
+    public struct Signature: Codable, Sendable, Equatable {
+        public var name: String?
+        public var email: String?
+        public var date: Date?
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sha, commit, author
+        case htmlURL = "html_url"
+    }
+}
+
+/// A file a pull request changes (`GET .../pulls/<n>/files`). `patch` is GitHub's unified diff of the file without
+/// its header, only the `@@` hunks; GitHub leaves it out for a binary file and for a diff too large to show.
+public struct GitHubPullRequestFile: Codable, Sendable, Equatable, Identifiable {
+    public var filename: String
+    /// `added`, `removed`, `modified`, `renamed`, `copied`, `changed` or `unchanged`.
+    public var status: String
+    public var additions: Int
+    public var deletions: Int
+    public var patch: String?
+    /// A renamed or copied file's old path.
+    public var previousFilename: String?
+
+    public var id: String { filename }
+
+    enum CodingKeys: String, CodingKey {
+        case filename, status, additions, deletions, patch
+        case previousFilename = "previous_filename"
+    }
+
+    /// `patch` parsed with git's diff parser, read-only (it has no header lines, so PatchBuilder cannot replay it);
+    /// nil without a patch.
+    public var diff: FileDiff? {
+        guard let patch else { return nil }
+        let change: FileDiff.Change = switch status {
+        case "added": .added
+        case "removed": .deleted
+        case "renamed": .renamed
+        case "copied": .copied
+        default: .modified
+        }
+        let new = Data(filename.utf8)
+        let old = previousFilename.map { Data($0.utf8) } ?? new
+        return FileDiff(
+            change: change, oldPath: change == .added ? nil : old, newPath: change == .deleted ? nil : new,
+            oldMode: nil, newMode: nil, similarity: nil, isBinary: false, isCombined: false,
+            hunks: DiffReader.parseHunks(Data(patch.utf8)), headerLines: [])
     }
 }
 

@@ -8,6 +8,12 @@
 import AppKit
 import SwiftUI
 
+extension EnvironmentValues {
+    /// The most height a modal's card may take in the window (`ModalHost`'s layer, less its margins); nil until laid
+    /// out. A form taller than that scrolls its content and keeps its buttons in view.
+    @Entry var modalAvailableHeight: CGFloat?
+}
+
 /// A modal of the window that is not a repo operation's.
 enum WindowModal: Identifiable {
     case confirmation(ModalConfirmation)
@@ -26,6 +32,8 @@ enum WindowModal: Identifiable {
 /// `MainView`.
 struct ModalHost: View {
     let model: WindowModel
+    /// The modal layer's height, once laid out.
+    @State private var layerHeight: CGFloat?
 
     /// One modal at a time; a window modal first, then the shown tab's (only one of those is set in practice).
     private enum Shown {
@@ -35,6 +43,7 @@ struct ModalHost: View {
         case dialog(RepoSession, OperationDialog)
         case rebase(RepoSession, RebaseRequest)
         case worktree(RepoSession, WorktreeForm)
+        case pullRequest(RepoSession, PullRequestForm)
 
         var id: String {
             switch self {
@@ -44,6 +53,7 @@ struct ModalHost: View {
             case .dialog(_, let dialog): "dialog \(dialog.id)"
             case .rebase(_, let request): "rebase \(request.id)"
             case .worktree(_, let form): "worktree \(form.id)"
+            case .pullRequest(_, let form): "pull request \(form.id)"
             }
         }
 
@@ -65,6 +75,7 @@ struct ModalHost: View {
         if let dialog = session.dialog { return .dialog(session, dialog) }
         if let request = session.rebaseRequest { return .rebase(session, request) }
         if let form = session.worktreeForm { return .worktree(session, form) }
+        if let form = session.pullRequestForm { return .pullRequest(session, form) }
         return nil
     }
 
@@ -81,8 +92,12 @@ struct ModalHost: View {
                 ZStack {
                     ModalScrim { if shown.closesOnScrimTap { cancel(shown) } }
                     card(shown)
+                        .environment(\.modalAvailableHeight,
+                                     layerHeight.map { max(0, $0 - 2 * ModalMetrics.margin) })
                         .padding(ModalMetrics.margin)
                 }
+                // The scrim fills the window under the toolbar: a tall form fits its card in that (`CreatePRView`).
+                .onGeometryChange(for: CGFloat.self, of: \.size.height) { layerHeight = $0 }
                 // A new view per modal: the focus to restore starts over.
                 .id(shown.id)
                 .modifier(RestoresFocus())
@@ -130,6 +145,8 @@ struct ModalHost: View {
             InteractiveRebaseView(session: session, request: request) { session.rebaseRequest = nil }
         case .worktree(let session, let form):
             AddWorktreeView(session: session, form: form) { session.worktreeForm = nil }
+        case .pullRequest(let session, let form):
+            CreatePRView(session: session, form: form) { session.pullRequestForm = nil }
         }
     }
 
@@ -141,6 +158,7 @@ struct ModalHost: View {
         case .dialog(let session, _): session.dialog = nil
         case .rebase(let session, _): session.rebaseRequest = nil
         case .worktree(let session, _): session.worktreeForm = nil
+        case .pullRequest(let session, _): session.pullRequestForm = nil
         }
     }
 }

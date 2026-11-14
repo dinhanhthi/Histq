@@ -251,6 +251,9 @@ final class RepoSession: Identifiable {
         /// A detached HEAD.
         case checkoutCommit(String)
         case checkoutFiles([String], from: String)
+        /// A GitHub pull request's Checkout locally: fetches `pull/<n>/head` from `remote` into the new branch `pr/<n>`
+        /// (never over an existing one: the PR detail checks that first), then checks it out.
+        case checkoutPullRequest(number: Int, remote: String)
 
         case fetchAll(prune: Bool)
         case pull(GitOperations.PullMode)
@@ -320,7 +323,7 @@ final class RepoSession: Identifiable {
         var remote: String? {
             switch self {
             case .push(_, let remote, _, _, _), .pushTag(_, let remote), .pushMirror(let remote),
-                 .deleteRemoteBranch(_, let remote), .deleteRemoteTag(_, let remote):
+                 .deleteRemoteBranch(_, let remote), .deleteRemoteTag(_, let remote), .checkoutPullRequest(_, let remote):
                 remote
             default:
                 nil
@@ -343,7 +346,9 @@ final class RepoSession: Identifiable {
         /// The writes that talk to a remote: the only ones that read the profile's GitHub token.
         var isNetwork: Bool {
             switch self {
-            case .fetchAll, .pull, .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteRemoteTag: true
+            case .fetchAll, .pull, .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteRemoteTag,
+                 .checkoutPullRequest:
+                true
             default: false
             }
         }
@@ -404,10 +409,13 @@ final class RepoSession: Identifiable {
     var rebaseRequest: RebaseRequest?
     /// The Add Worktree form (`AddWorktreeView`).
     var worktreeForm: WorktreeForm?
+    /// The Create Pull Request form (`CreatePRView`).
+    var pullRequestForm: PullRequestForm?
 
     /// A form, confirmation, host-key or rebase modal is open (`ModalHost` shows it over the window).
     var hasModal: Bool {
         dialog != nil || confirmation != nil || hostKeyCheck != nil || rebaseRequest != nil || worktreeForm != nil
+            || pullRequestForm != nil
     }
 
     /// Cancels every open modal, as their Cancel buttons do (a tab or page change).
@@ -417,6 +425,7 @@ final class RepoSession: Identifiable {
         hostKeyCheck = nil
         rebaseRequest = nil
         worktreeForm = nil
+        pullRequestForm = nil
     }
     /// The undo journal's next entries, read with the refs; the toolbar, the Edit menu and the palette show them.
     private(set) var undoStatus = UndoStatus()
@@ -470,6 +479,17 @@ final class RepoSession: Identifiable {
 
     /// The file panel2 shows instead of the graph (a click in the WIP panel or a commit's files); nil shows the graph.
     private(set) var openFile: FileTarget?
+    /// The pull request or issue panel2 shows instead of the graph (a click in the PRs tab); nil shows the graph or
+    /// the open file. Only one of the two is ever set.
+    private(set) var openHosted: HostedItem?
+    /// Changes with every PR or issue select: its placeholder logs a line per select.
+    private(set) var hostedToken = 0
+    /// The tab's GitHub repository and lists (the PRs tab).
+    let github = GitHubStore()
+    /// The open pull request's detail (panel2), loaded when its row is selected.
+    let pullDetail = PullRequestDetailModel()
+    /// The open issue's detail (panel2), loaded when its row is selected.
+    let issueDetail = IssueDetailModel()
     /// The open file's diff: `.loading` in the same call as the click, then its cards.
     private(set) var fileDiff: Loadable<FileDiffDetail> = .idle
     /// Changes with every file select (and "Load anyway"): the diff placeholder logs a line per select.
@@ -536,6 +556,21 @@ final class RepoSession: Identifiable {
                 }
                 guard let self else { return }
                 RepoMenus.debugShow(step, session: self)
+            }
+        }
+        // `-HistqOpenCreatePR <branch>`: the branch menu's Create Pull Request… once the refs and the GitHub connection
+        // are in (QA shots of the form; with `-HistqGitHubStub YES` its Create makes the stub's PR #3).
+        if let branch = AppState.launchFlag("-HistqOpenCreatePR") {
+            Task { [weak self] in
+                for _ in 0..<100 {
+                    if self?.refs.value != nil, self?.github.api != nil { break }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                guard let self else { return }
+                if let reason = RepoMenus.createPullRequestUnavailableReason(head: .local(branch), base: nil, self) {
+                    return RepoMenus.debugLog("create-pr \(branch): \(reason)")
+                }
+                RepoMenus.openCreatePullRequest(head: .local(branch), base: nil, self)
             }
         }
         // `-HistqCommit "<message>"`: commits the staged changes of a fixture copy through the WIP panel's write path
@@ -610,6 +645,7 @@ final class RepoSession: Identifiable {
         autoFetchTask = nil
         preferencesObserver = nil
         profileTask?.cancel()
+        github.stop()
     }
 
     // MARK: Profile
@@ -1383,6 +1419,11 @@ final class RepoSession: Identifiable {
     /// A conflicted WIP file opens the conflict editor instead of a diff (`FileTarget.isConflict`).
     func selectFile(_ target: FileTarget) {
         UITiming.select(fileDetail(target))
+        if openHosted != nil {
+            openHosted = nil
+            pullDetail.close()
+            issueDetail.close()
+        }
         openFile = target
         fileIgnoresSizeLimit = false
         startFileLoad()
@@ -1402,8 +1443,13 @@ final class RepoSession: Identifiable {
     }
 
     /// Shows the graph again (Esc, the back button, the conflict editor's close, another graph row or sidebar ref).
-    /// The conflict editor's unsaved ticks and edits go with it.
+    /// The conflict editor's unsaved ticks and edits go with it. An open pull request or issue closes too.
     func closeFile() {
+        if openHosted != nil {
+            openHosted = nil
+            pullDetail.close()
+            issueDetail.close()
+        }
         guard openFile != nil else { return }
         fileTask?.cancel()
         fileTask = nil
@@ -1412,6 +1458,38 @@ final class RepoSession: Identifiable {
         conflict = .idle
         conflictBusy = nil
         conflictError = nil
+    }
+
+    /// Shows a pull request or an issue of the PRs tab in panel2 now (a click on its row): the open file closes and the
+    /// item's placeholder shows in the click's frame; a pull request's detail starts loading in the same call.
+    func selectHosted(_ item: HostedItem) {
+        UITiming.select(item.timingDetail)
+        closeFile()
+        openHosted = item
+        hostedToken &+= 1
+        switch item {
+        case .pullRequest(let number): pullDetail.load(number, github: github)
+        case .issue(let number): issueDetail.load(number, github: github)
+        }
+    }
+
+    /// The subjects of the commits a pull request from `head` into `base` would have, newest first, at most `limit`
+    /// (both full refs, the remote-tracking branches GitHub compares); nil when git cannot read them. Read
+    /// environment, off the main actor.
+    func commitSubjects(base: String, head: String, limit: Int) async -> [String]? {
+        guard let backend = try? await backend() else { return nil }
+        return try? await Self.readSubjects(backend, cwd: url, range: "\(base)..\(head)", limit: limit)
+    }
+
+    @concurrent
+    private nonisolated static func readSubjects(_ backend: Backend, cwd: URL, range: String, limit: Int) async throws
+        -> [String]
+    {
+        let env = try await backend.readEnvironment(cwd: cwd)
+        let output = try await backend.runner.run(
+            ["log", "-z", "--no-show-signature", "--format=%s", "--max-count=\(limit)", "--end-of-options", range, "--"],
+            cwd: cwd, env: env)
+        return output.text.split(separator: "\0").map(String.init).filter { !$0.isEmpty }
     }
 
     /// Loads the open file past the size limit: its card's "Load anyway".
@@ -2294,6 +2372,9 @@ final class RepoSession: Identifiable {
             try await ops.checkoutTracking(remoteBranch: remoteBranch, as: localName)
         case .checkoutCommit(let revision): try await ops.checkout(commit: revision)
         case .checkoutFiles(let paths, let revision): try await ops.checkoutFiles(paths, from: revision)
+        case .checkoutPullRequest(let number, let remote):
+            try await ops.fetchRefspec(remote: remote, refspec: "pull/\(number)/head:pr/\(number)")
+            try await ops.checkout(branch: "pr/\(number)")
 
         case .fetchAll(let prune): try await ops.fetchAll(prune: prune)
         case .pull(let mode): try await ops.pull(mode)
@@ -2608,6 +2689,7 @@ final class RepoSession: Identifiable {
             case .invalidRemoteURL: "That is not a valid remote URL."
             case .invalidObjectID(let text): "\(text) is not a commit id."
             case .noPaths: "No files were given."
+            case .invalidRefspec(let refspec): "\"\(refspec)\" is not a ref and a new branch name."
             case .invalidStashIndex: "That stash no longer exists."
             case .invalidMainline(let parent): "A merge has no parent \(parent)."
             case .noOperationInProgress: "No merge, rebase, cherry-pick or revert is in progress."

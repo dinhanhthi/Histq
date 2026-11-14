@@ -28,6 +28,8 @@ public enum GitOperationError: Error, Equatable, Sendable {
     case invalidObjectID(String)
     /// A path operation got no paths (`clean --`/`reset --` without paths would touch everything).
     case noPaths
+    /// A `fetchRefspec` refspec that is not `<remote ref>:<new local branch>` (a force `+`, an option, a pattern).
+    case invalidRefspec(String)
     case invalidStashIndex(Int)
     case invalidMainline(Int)
     /// `continue`/`abort`/`skip` asked with no operation in progress.
@@ -256,6 +258,28 @@ public struct GitOperations: Sendable {
                 : try? await GitInvocation.remoteNames(runner: ops.runner, cwd: ops.cwd, env: ops.env)
             try await ops.networkExec(
                 ["fetch", "--all"] + (prune ? ["--prune"] : []), target: remotes.map { .fetch(remotes: $0) })
+        }
+    }
+
+    /// Fetches one ref of `remote` into a local branch, never forced: `refspec` is `<ref>:<branch>`, e.g.
+    /// `pull/12/head:pr/12` (a GitHub pull request's head). The ref is taken under `refs/` (`refs/pull/12/head`) and
+    /// the branch under `refs/heads/`, both must pass `git check-ref-format`, neither may start with `-` or `+`, and the
+    /// remote must be a remote name (not a URL or an option). An existing branch is only fast-forwarded (git refuses
+    /// anything else, and a branch checked out anywhere). The token goes through the gate like every network command.
+    public func fetchRefspec(remote: String, refspec: String) async throws {
+        let parts = refspec.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 2, let source = parts.first, let branch = parts.last,
+              !source.hasPrefix("-"), !source.hasPrefix("+"), !branch.hasPrefix("+"),
+              !refspec.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) })
+        else { throw GitOperationError.invalidRefspec(refspec) }
+        let sourceRef = source.hasPrefix("refs/") ? source : "refs/\(source)"
+        guard !source.isEmpty, await checkRefFormat(sourceRef) else { throw GitOperationError.invalidRefspec(refspec) }
+        try await validateRemoteName(remote)
+        try await validateBranchName(branch)
+        try await lane { ops in
+            try await ops.networkExec(
+                ["fetch", "--end-of-options", remote, "\(sourceRef):refs/heads/\(branch)"],
+                target: .fetch(remotes: [remote]))
         }
     }
 

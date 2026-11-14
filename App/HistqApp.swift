@@ -197,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.isReleasedWhenClosed = false
         let previewScreen = WindowSizing.previewScreen
-        window.setContentSize(WindowSizing.initialSize(on: previewScreen ?? NSScreen.main))
+        window.setContentSize(WindowSizing.launchSize ?? WindowSizing.initialSize(on: previewScreen ?? NSScreen.main))
         WindowSizing.clampMinimum(of: window)
         if let frame, NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
             // A restored frame (a QA run's comes from its own state dir); one on a screen that is gone is not used.
@@ -539,6 +539,13 @@ private enum WindowSizing {
     static var previewScreen: NSScreen? {
         guard AppState.isBackgroundLaunch, AppState.isStateDirMode else { return nil }
         return NSScreen.screens.first { $0.localizedName.localizedCaseInsensitiveContains("ARZOPA") }
+    }
+
+    /// DEBUG `-HistqWindowSize <width>x<height>` (e.g. `912x520`, the minimum): a new window's size, for QA of the
+    /// layout at a given size; the minimum still applies (`clampMinimum`). nil without the flag, and in Release.
+    static let launchSize: NSSize? = AppState.launchFlag("-HistqWindowSize").flatMap { value in
+        let parts = value.split(separator: "x").compactMap { Double($0) }
+        return parts.count == 2 ? NSSize(width: parts[0], height: parts[1]) : nil
     }
 
     /// `preferred`, at least the minimum, at most the screen's visible frame.

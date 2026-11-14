@@ -286,6 +286,27 @@ public enum DiffReader {
         return files
     }
 
+    /// The hunks of a patch that has no file header, only `@@` hunks (a code host's per-file `patch`); lines before
+    /// the first hunk header are skipped.
+    static func parseHunks(_ patch: Data) -> [DiffHunk] {
+        var lines = patch.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
+        if lines.last?.isEmpty == true { lines.removeLast() }
+        var hunks: [DiffHunk] = []
+        var index = 0
+        while index < lines.count {
+            guard lines[index].starts(with: Bytes.hunk) else {
+                index += 1
+                continue
+            }
+            let start = index
+            guard let hunk = parseHunk(lines, &index) else { break }
+            hunks.append(hunk)
+            // A header line that parsed to nothing would not move the index.
+            if index == start { index += 1 }
+        }
+        return hunks
+    }
+
     private enum Bytes {
         static let diffGit = Array("diff --git ".utf8)
         static let diffCC = Array("diff --cc ".utf8)

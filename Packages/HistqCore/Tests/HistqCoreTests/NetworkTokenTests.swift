@@ -274,6 +274,62 @@ struct NetworkTokenTests {
         #expect(box.transportGotUserSecret)
     }
 
+    // MARK: - Fetch refspec
+
+    @Test("fetchRefspec fetches a pull request's head into pr/<n> through the gate: the transport gets the token, no hook")
+    func fetchRefspecGoesThroughGate() async throws {
+        for naive in [true, false] {
+            let box = try await TokenSandbox()
+            defer { box.remove() }
+            let (repo, source) = try await box.makeRepoWithRemote()
+            try await box.sandbox.git(["update-ref", "refs/pull/1/head", "HEAD"], in: source)
+            try box.writeMarker("rt", to: repo.appending(path: ".git/hooks/reference-transaction"))
+            try await box.operations(naive: naive, in: repo).fetchRefspec(remote: "origin", refspec: "pull/1/head:pr/1")
+            #expect(box.transportGotToken, "the fetch did not sign in with the token (naive: \(naive))")
+            #expect(try await box.hasRef("refs/heads/pr/1", in: repo))
+            if naive {
+                #expect(box.sawToken("rt"), "positive control: the hook sees the token in the naive environment")
+            } else {
+                #expect(!box.sawToken("rt"), "the reference-transaction hook saw the token")
+            }
+        }
+    }
+
+    @Test("fetchRefspec refuses a forced, option-like, pattern or malformed refspec, a bad branch and a non-remote")
+    func fetchRefspecRefusesInjection() async throws {
+        let box = try await TokenSandbox()
+        defer { box.remove() }
+        let (repo, source) = try await box.makeRepoWithRemote()
+        try await box.sandbox.git(["update-ref", "refs/pull/1/head", "HEAD"], in: source)
+        let ops = box.operations(naive: false, in: repo)
+        let cases: [(remote: String, refspec: String, error: GitOperationError)] = [
+            ("origin", "+pull/1/head:pr/1", .invalidRefspec("+pull/1/head:pr/1")),
+            ("origin", "pull/1/head:+pr/1", .invalidRefspec("pull/1/head:+pr/1")),
+            ("origin", "--upload-pack=touch x:pr/1", .invalidRefspec("--upload-pack=touch x:pr/1")),
+            ("origin", "pull/1/head", .invalidRefspec("pull/1/head")),
+            ("origin", ":pr/1", .invalidRefspec(":pr/1")),
+            ("origin", "a:b:c", .invalidRefspec("a:b:c")),
+            ("origin", "pull/*/head:pr/1", .invalidRefspec("pull/*/head:pr/1")),
+            ("origin", "pull/1/head:pr/1 x", .invalidRefspec("pull/1/head:pr/1 x")),
+            ("origin", "pull/1/head:-pr", .invalidBranchName("-pr")),
+            ("origin", "pull/1/head:pr/1..2", .invalidBranchName("pr/1..2")),
+            ("--upload-pack=touch x", "pull/1/head:pr/1", .invalidRemoteName("--upload-pack=touch x")),
+            ("-o", "pull/1/head:pr/1", .invalidRemoteName("-o")),
+            (box.url(source), "pull/1/head:pr/1", .invalidRemoteName(box.url(source))),
+        ]
+        for item in cases {
+            await #expect(throws: item.error, "\(item.remote) \(item.refspec)") {
+                try await ops.fetchRefspec(remote: item.remote, refspec: item.refspec)
+            }
+        }
+        #expect(!box.transportRan, "a refused fetch still contacted the remote")
+        #expect(!(try await box.hasRef("refs/heads/pr/1", in: repo)))
+        // Positive control: the same fetch with a valid refspec runs.
+        try await ops.fetchRefspec(remote: "origin", refspec: "pull/1/head:pr/1")
+        #expect(box.transportRan)
+        #expect(try await box.hasRef("refs/heads/pr/1", in: repo))
+    }
+
     // MARK: - Pull
 
     @Test(

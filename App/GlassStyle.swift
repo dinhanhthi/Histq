@@ -103,6 +103,10 @@ enum Palette {
     static let graphBadgeText = NSColor.white.withAlphaComponent(0.92)
     /// A tag badge's neutral fill. White 0.14
     static let graphTagFill = NSColor.white.withAlphaComponent(0.14)
+    /// A branch badge's pull request chip: GitHub's open green, or its draft grey, solid so it reads on any lane fill.
+    /// #238636 / #6E7681
+    static let graphPullOpenFill = srgb(0x238636)
+    static let graphPullDraftFill = srgb(0x6E7681)
     /// Initials on a node, dark on the bright lanes. #1C1C1E
     static let graphNodeText = srgb(0x1C1C1E)
     /// The inside of a hollow node (WIP, stash), so the lines under it do not show: the card's `surface`. #2C2C2E

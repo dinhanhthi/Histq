@@ -1,6 +1,7 @@
-// The graph table's cells other than the lanes: the ref badges (joined to their node by a line in the lane color),
-// the text columns, the selected row's neutral capsule and the column header. Every cell draws itself in `draw(_:)`
-// with cached fonts, attributes and symbols; text is truncated with "…".
+// The graph table's cells other than the lanes: the ref badges (joined to their node by a line in the lane color; a
+// branch with an open pull request carries its "#N" chip, which a click opens), the text columns, the selected row's
+// neutral capsule and the column header. Every cell draws itself in `draw(_:)` with cached fonts, attributes and
+// symbols; text is truncated with "…".
 import AppKit
 import HistqCore
 
@@ -19,15 +20,24 @@ struct RefBadge: Hashable {
         case worktree
     }
 
+    /// An open pull request whose head is this branch: drawn as a chip at the badge's end.
+    struct PullRequest: Hashable, Sendable {
+        let number: Int
+        let isDraft: Bool
+    }
+
     let kind: Kind
     let name: String
     /// Commits ahead of / behind the upstream (local branches).
     var ahead = 0
     var behind = 0
+    var pullRequest: PullRequest?
 
     /// The badges of every labeled commit, in row order: HEAD's branch (or a detached HEAD) first, then local
-    /// branches, remote branches that are not merged into a local badge, then tags. Built once per refs read.
-    static func badges(for refs: Refs) -> [String: [RefBadge]] {
+    /// branches, remote branches that are not merged into a local badge, then tags. Built once per refs read (and per
+    /// change of `pullRequests`, the store's `branchPullRequests`: a remote branch's pull request by its name, which a
+    /// local branch gets through its upstream).
+    static func badges(for refs: Refs, pullRequests: [String: PullRequest] = [:]) -> [String: [RefBadge]] {
         var byCommit: [String: [RefBadge]] = [:]
         let remoteCommits = Dictionary(refs.remoteBranches.map { ($0.name, $0.commit) }, uniquingKeysWith: { a, _ in a })
         var mergedRemotes = Set<String>()
@@ -42,11 +52,12 @@ struct RefBadge: Hashable {
             }
             byCommit[branch.commit, default: []].append(RefBadge(
                 kind: .branch(isLocal: true, isRemote: isRemote, isHead: branch.isHead), name: branch.name,
-                ahead: branch.ahead, behind: branch.behind))
+                ahead: branch.ahead, behind: branch.behind, pullRequest: branch.upstream.flatMap { pullRequests[$0] }))
         }
         for remote in refs.remoteBranches where !mergedRemotes.contains(remote.name) {
             byCommit[remote.commit, default: []].append(RefBadge(
-                kind: .branch(isLocal: false, isRemote: true, isHead: false), name: remote.name))
+                kind: .branch(isLocal: false, isRemote: true, isHead: false), name: remote.name,
+                pullRequest: pullRequests[remote.name]))
         }
         for tag in refs.tags {
             byCommit[tag.commit ?? tag.target, default: []].append(RefBadge(kind: .tag, name: tag.name))
@@ -96,6 +107,10 @@ final class RefBadgeCellView: NSView {
         static let height: CGFloat = 22
         /// Room kept for the line to the node.
         static let trailing: CGFloat = 8
+        /// The pull request chip: inset from the badge's edges, its own padding, and its corner radius.
+        static let chipInset: CGFloat = 2
+        static let chipPadding: CGFloat = 5
+        static let chipRadius: CGFloat = 4
     }
 
     /// A glyph's slot width: the check keeps the small one.
@@ -134,12 +149,22 @@ final class RefBadgeCellView: NSView {
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
-    /// The badge's width without its name, and its name's width.
+    /// The pull request chip's width: its icon and "#N".
+    private static func pullChipWidth(_ pull: PullRequestChip) -> CGFloat {
+        2 * Style.chipPadding + Style.icon + Style.iconGap
+            + ceil((pull.text as NSString).size(withAttributes: Style.count).width)
+    }
+
+    /// The badge's width without its name, and its name's width. A pull request chip takes the place of the badge's
+    /// right padding, `chipInset` from its edge.
     private static func widths(_ badge: RefBadge) -> (chrome: CGFloat, name: CGFloat) {
         let (leading, trailing) = icons(badge)
         var chrome = 2 * Style.padding + (leading + trailing).reduce(0) { $0 + iconWidth($1) + Style.iconGap }
         if let counts = aheadBehind(badge) {
             chrome += Style.iconGap + ceil((counts as NSString).size(withAttributes: Style.count).width)
+        }
+        if let pull = badge.pullRequest.map(PullRequestChip.init) {
+            chrome += Style.iconGap + pullChipWidth(pull) + Style.chipInset - Style.padding
         }
         let name = ceil((badge.name as NSString).size(withAttributes: Style.text).width)
         return (chrome, name)
@@ -156,6 +181,24 @@ final class RefBadgeCellView: NSView {
     func badge(at point: CGPoint) -> RefBadge? {
         guard let layout = layout() else { return nil }
         return layout.badges.first { $0.rect.contains(point) }.map { badges[$0.index] }
+    }
+
+    /// The pull request whose chip is drawn at `point` (in this view): a click there opens it.
+    func pullRequest(at point: CGPoint) -> RefBadge.PullRequest? {
+        guard let layout = layout() else { return nil }
+        for (index, rect) in layout.badges {
+            guard let pull = badges[index].pullRequest, Self.chipRect(PullRequestChip(pull), in: rect).contains(point)
+            else { continue }
+            return pull
+        }
+        return nil
+    }
+
+    /// The chip's frame inside its badge's: at the trailing end, `chipInset` from the badge's edges.
+    private static func chipRect(_ pull: PullRequestChip, in rect: CGRect) -> CGRect {
+        let width = min(pullChipWidth(pull), rect.width - 2 * Style.chipInset)
+        return CGRect(x: rect.maxX - Style.chipInset - width, y: rect.minY + Style.chipInset,
+                      width: max(0, width), height: max(0, rect.height - 2 * Style.chipInset))
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -269,6 +312,11 @@ final class RefBadgeCellView: NSView {
             x += Self.iconWidth(name) + Style.iconGap
         }
         var trailingX = rect.maxX - Style.padding
+        if let pull = badge.pullRequest.map(PullRequestChip.init) {
+            let chip = Self.chipRect(pull, in: rect)
+            drawPullRequestChip(pull, in: chip, context: context)
+            trailingX = chip.minX - Style.iconGap
+        }
         for name in trailing.reversed() {
             trailingX -= Self.iconWidth(name)
             drawIcon(name, x: trailingX, midY: rect.midY)
@@ -287,14 +335,44 @@ final class RefBadgeCellView: NSView {
                                       attributes: Style.text)
     }
 
+    /// The pull icon and "#N" on GitHub's open green (or draft grey).
+    private func drawPullRequestChip(_ pull: PullRequestChip, in rect: CGRect, context: CGContext) {
+        (pull.isDraft ? Palette.graphPullDraftFill : Palette.graphPullOpenFill).setFill()
+        context.addPath(CGPath(roundedRect: rect, cornerWidth: Style.chipRadius, cornerHeight: Style.chipRadius,
+                               transform: nil))
+        context.fillPath()
+        context.saveGState()
+        context.clip(to: rect)
+        let x = rect.minX + Style.chipPadding
+        drawIcon("arrow.triangle.pull", x: x, midY: rect.midY, slot: Style.icon)
+        let size = (pull.text as NSString).size(withAttributes: Style.count)
+        (pull.text as NSString).draw(at: CGPoint(x: x + Style.icon + Style.iconGap, y: rect.midY - size.height / 2),
+                                     withAttributes: Style.count)
+        context.restoreGState()
+    }
+
     private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat) {
+        drawIcon(name, x: x, midY: midY, slot: Self.iconWidth(name))
+    }
+
+    private func drawIcon(_ name: String, x: CGFloat, midY: CGFloat, slot: CGFloat) {
         guard let image = Self.symbol(name) else { return }
-        let slot = Self.iconWidth(name)
         let size = image.size
         let scale = min(1, slot / max(size.width, size.height))
         let width = size.width * scale
         let height = size.height * scale
         image.draw(in: CGRect(x: x + (slot - width) / 2, y: midY - height / 2, width: width, height: height))
+    }
+}
+
+/// What a pull request chip draws.
+private struct PullRequestChip {
+    let text: String
+    let isDraft: Bool
+
+    init(_ pull: RefBadge.PullRequest) {
+        text = "#\(pull.number)"
+        isDraft = pull.isDraft
     }
 }
 

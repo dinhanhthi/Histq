@@ -96,6 +96,8 @@ struct RepoLayoutView: View {
             }
             .padding([.horizontal, .bottom], RepoLayoutMetrics.inset)
         }
+        // The tab's GitHub lists, for the PRs tab and the graph's PR badges.
+        .background(GitHubDriver(session: session))
     }
 
     /// The three panels and their dividers.
@@ -124,17 +126,21 @@ struct RepoLayoutView: View {
         }
     }
 
-    /// The graph, with the open file's diff or conflict editor over it.
+    /// The graph, with the open file's diff or conflict editor, or the open pull request or issue, over it.
     private var panel2: some View {
         ZStack {
             // The graph stays mounted under an open file, so Esc brings it back as it was (scroll, selection)
             // and opening a file costs no teardown in the click's frame.
-            let fileOpen = session.openFile != nil
+            let fileOpen = session.openFile != nil || session.openHosted != nil
             CommitListPanel(session: session)
                 .opacity(fileOpen ? 0 : 1)
                 .allowsHitTesting(!fileOpen)
                 .accessibilityHidden(fileOpen)
-            if let target = session.openFile {
+            if case .pullRequest(let number) = session.openHosted {
+                PRDetailView(session: session, number: number)
+            } else if case .issue(let number) = session.openHosted {
+                IssueDetailView(session: session, number: number)
+            } else if let target = session.openFile {
                 if target.isConflict {
                     ConflictEditorView(session: session, target: target)
                 } else {
@@ -200,7 +206,8 @@ private struct CommitListPanel: View {
                 case .loaded(let log):
                     // A click selects through the session (the detail switches in the same frame); a double-click
                     // checks out; a right-click opens the row's or the badge's menu; a badge dropped on another opens
-                    // Merge / Rebase / Fast-forward.
+                    // Merge / Rebase / Fast-forward / Create Pull Request; a click on a badge's "#N" chip opens that
+                    // pull request in the same frame.
                     GraphView(log: log, refs: session.refs.value, status: session.status.value,
                               dateFormat: dateFormat, rowDensity: rowDensity, selection: session.graphSelection,
                               onSelect: { [session] items in session.selectGraph(items) },
@@ -215,7 +222,9 @@ private struct CommitListPanel: View {
                               },
                               canUndo: { [session] redo in session.historyAvailability(redo: redo).isEnabled },
                               onUndo: { [session] redo in if redo { session.redo() } else { session.undo() } },
-                              onOpenWorktree: { [session] path in session.openWorktree(path) })
+                              onOpenWorktree: { [session] path in session.openWorktree(path) },
+                              pullRequests: session.github.branchPullRequests,
+                              onOpenPullRequest: { [session] number in session.selectHosted(.pullRequest(number)) })
                         .onAppear { UITiming.content("commits \(session.url.lastPathComponent)") }
                 case .failed(let message):
                     Label(message, systemImage: "exclamationmark.triangle")

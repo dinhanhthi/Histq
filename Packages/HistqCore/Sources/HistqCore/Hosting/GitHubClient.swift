@@ -27,6 +27,8 @@ public enum GitHubError: Error, Equatable, Sendable, CustomStringConvertible {
     case secondaryRateLimited(retryAfterSeconds: Int?)
     /// 422: GitHub refused the request's fields (a pull request that already exists, an unknown branch).
     case validationFailed(message: String)
+    /// 409 on a merge: the head is no longer the commit the merge pinned (pushed to since it was reviewed).
+    case headChanged
     case http(status: Int, message: String)
     /// A body that is not the expected JSON, or a `Link` to another origin.
     case invalidResponse(String)
@@ -47,6 +49,7 @@ public enum GitHubError: Error, Equatable, Sendable, CustomStringConvertible {
         case .secondaryRateLimited(let seconds):
             if let seconds { "GitHub asks to slow down; retry in \(seconds) s." } else { "GitHub asks to slow down." }
         case .validationFailed(let message): "GitHub refused the request: \(message)"
+        case .headChanged: "The pull request's head changed: reload and review it again."
         case .http(let status, let message): "GitHub answered \(status): \(message)"
         case .invalidResponse(let detail): "Unexpected answer from GitHub: \(detail)"
         case .transport(let detail): "Could not reach GitHub: \(detail)"
@@ -177,6 +180,18 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         return all.filter { !$0.isPullRequest }
     }
 
+    public func myOpenPullRequests(in repo: HostedRepository) async throws -> [GitHubIssue] {
+        try await search(["is:pr", "is:open", "author:@me"], in: repo)
+    }
+
+    public func reviewRequestedPullRequests(in repo: HostedRepository) async throws -> [GitHubIssue] {
+        try await search(["is:pr", "is:open", "review-requested:@me"], in: repo)
+    }
+
+    public func assignedOpenIssues(in repo: HostedRepository) async throws -> [GitHubIssue] {
+        try await search(["is:issue", "is:open", "assignee:@me"], in: repo)
+    }
+
     public func issue(_ number: Int, in repo: HostedRepository) async throws -> GitHubIssue {
         try await get(url(try repoPath(repo) + ["issues", String(number)]))
     }
@@ -189,6 +204,14 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         try await list(url(try repoPath(repo) + ["pulls", String(number), "reviews"]))
     }
 
+    public func pullRequestCommits(_ number: Int, in repo: HostedRepository) async throws -> [GitHubCommit] {
+        try await list(url(try repoPath(repo) + ["pulls", String(number), "commits"]))
+    }
+
+    public func pullRequestFiles(_ number: Int, in repo: HostedRepository) async throws -> [GitHubPullRequestFile] {
+        try await list(url(try repoPath(repo) + ["pulls", String(number), "files"]))
+    }
+
     public func checkRuns(for ref: String, in repo: HostedRepository) async throws -> [GitHubCheckRun] {
         struct Page: Decodable {
             var checkRuns: [GitHubCheckRun]
@@ -196,6 +219,22 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
         }
         let first = url(try repoPath(repo) + ["commits", ref, "check-runs"])
         return try await paginated(first) { (page: Page) in page.checkRuns }
+    }
+
+    public func repositoryInfo(_ repo: HostedRepository) async throws -> GitHubRepositoryInfo {
+        try await get(url(try repoPath(repo)))
+    }
+
+    public func labels(in repo: HostedRepository) async throws -> [GitHubLabel] {
+        try await list(url(try repoPath(repo) + ["labels"]))
+    }
+
+    public func assignableUsers(in repo: HostedRepository) async throws -> [GitHubUser] {
+        try await list(url(try repoPath(repo) + ["assignees"]))
+    }
+
+    public func collaborators(in repo: HostedRepository) async throws -> [GitHubUser] {
+        try await list(url(try repoPath(repo) + ["collaborators"]))
     }
 
     public func createPullRequest(_ pullRequest: NewPullRequest, in repo: HostedRepository) async throws
@@ -206,6 +245,24 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             title: pullRequest.title, head: pullRequest.head, base: pullRequest.base, body: pullRequest.body,
             draft: pullRequest.draft)
         return try await send("POST", url(try repoPath(repo) + ["pulls"]), body: body)
+    }
+
+    public func requestReviewers(_ logins: [String], on number: Int, in repo: HostedRepository) async throws {
+        struct Result: Decodable { var number: Int }
+        let _: Result = try await send(
+            "POST", url(try repoPath(repo) + ["pulls", String(number), "requested_reviewers"]),
+            body: ["reviewers": logins])
+    }
+
+    public func addLabels(_ names: [String], to number: Int, in repo: HostedRepository) async throws {
+        let _: [GitHubLabel] = try await send(
+            "POST", url(try repoPath(repo) + ["issues", String(number), "labels"]), body: ["labels": names])
+    }
+
+    public func addAssignees(_ logins: [String], to number: Int, in repo: HostedRepository) async throws {
+        struct Result: Decodable { var number: Int }
+        let _: Result = try await send(
+            "POST", url(try repoPath(repo) + ["issues", String(number), "assignees"]), body: ["assignees": logins])
     }
 
     public func comment(on number: Int, in repo: HostedRepository, body: String) async throws -> GitHubComment {
@@ -221,11 +278,23 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
             body: Body(event: event.rawValue, body: body))
     }
 
-    public func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod) async throws {
+    /// Merges only while the head is still `sha`, the commit the user reviewed: a push in between makes GitHub answer
+    /// 409, thrown as `GitHubError.headChanged`, rather than merging commits nobody saw.
+    public func merge(_ number: Int, in repo: HostedRepository, method: HostedMergeMethod, sha: String) async throws {
+        struct Body: Encodable {
+            var method: String
+            var sha: String
+            enum CodingKeys: String, CodingKey { case method = "merge_method", sha }
+        }
         struct Result: Decodable { var merged: Bool? }
-        let _: Result = try await send(
-            "PUT", url(try repoPath(repo) + ["pulls", String(number), "merge"]),
-            body: ["merge_method": method.rawValue])
+        do {
+            let _: Result = try await send(
+                "PUT", url(try repoPath(repo) + ["pulls", String(number), "merge"]),
+                body: Body(method: method.rawValue, sha: sha))
+        } catch GitHubError.http(status: 409, message: _) {
+            // Mapped here only: a 409 of another endpoint means something else.
+            throw GitHubError.headChanged
+        }
     }
 
     public func setOpen(_ open: Bool, number: Int, in repo: HostedRepository) async throws {
@@ -240,6 +309,20 @@ public struct GitHubClient: HostingProvider, CustomStringConvertible, CustomDebu
     private func repoPath(_ repo: HostedRepository) throws -> [String] {
         guard repo.host.lowercased() == host else { throw GitHubError.wrongHost(repo.host) }
         return ["repos", repo.owner, repo.name]
+    }
+
+    /// `GET /search/issues?q=repo:<owner>/<name> <qualifiers>`, most recently updated first, every page up to
+    /// `maxPages`. `@me` is the token's user. The owner and name go into the query text, so they must be plain
+    /// segments (as `repository(fromRemoteURL:)` makes them): a space or a quote would add qualifiers of its own.
+    private func search(_ qualifiers: [String], in repo: HostedRepository) async throws -> [GitHubIssue] {
+        _ = try repoPath(repo)
+        guard Self.isSafeSegment(repo.owner, extra: "-_"), Self.isSafeSegment(repo.name, extra: "-_.") else {
+            throw GitHubError.validationFailed(message: "not a repository name: \(repo.fullName)")
+        }
+        struct Page: Decodable { var items: [GitHubIssue] }
+        let query = (["repo:\(repo.owner)/\(repo.name)"] + qualifiers).joined(separator: " ")
+        let first = url(["search", "issues"], query: ["q": query, "sort": "updated", "order": "desc"])
+        return try await paginated(first) { (page: Page) in page.items }
     }
 
     /// `apiBase` plus `segments`, each percent-encoded as one path segment (a `/` in a branch name stays inside

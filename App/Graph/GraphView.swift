@@ -3,7 +3,8 @@
 // folder's name; a click opens it in a tab), the stash rows, then the commits, laid out by `GraphLayout`.
 // The table only asks for the rows on screen, so its cost does not grow with the log: a later page of the same load is
 // inserted as rows, a new load reloads. A click selects at once (`action`); a double-click calls the checkout hook
-// (`doubleAction`) without delaying the single click.
+// (`doubleAction`) without delaying the single click. A click on a branch badge's pull request chip opens that pull
+// request at mouse down instead of selecting the row.
 import AppKit
 import HistqCore
 import SwiftUI
@@ -92,6 +93,10 @@ struct GraphView: NSViewRepresentable {
     var onUndo: @MainActor (_ redo: Bool) -> Void = { _ in }
     /// A click on another worktree's WIP row, with its path (arrow keys passing over the row do not call it).
     var onOpenWorktree: @MainActor (String) -> Void = { _ in }
+    /// The open pull requests by remote branch (`GitHubStore.branchPullRequests`): their chips on the branch badges.
+    var pullRequests: [String: RefBadge.PullRequest] = [:]
+    /// A click on a pull request chip, with its number.
+    var onOpenPullRequest: @MainActor (Int) -> Void = { _ in }
 
     func makeCoordinator() -> GraphTableController { GraphTableController() }
 
@@ -148,7 +153,11 @@ final class GraphTableView: NSTableView {
     private(set) var mouseDownPoint: NSPoint?
 
     override func mouseDown(with event: NSEvent) {
-        mouseDownPoint = convert(event.locationInWindow, from: nil)
+        let point = convert(event.locationInWindow, from: nil)
+        // A pull request chip opens its pull request at once; the row's selection, its detail and a badge drag are
+        // left alone (a row select would close the pull request again).
+        if event.clickCount == 1, (delegate as? GraphTableController)?.openPullRequest(at: point) == true { return }
+        mouseDownPoint = point
         super.mouseDown(with: event)
     }
 
@@ -194,6 +203,7 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var view: GraphView?
     private var log = LogSnapshot()
     private var refs: Refs?
+    private var pullRequests: [String: RefBadge.PullRequest] = [:]
     private var badges: [String: [RefBadge]] = [:]
     private var wipDetail: String?
     private var dateFormat: String?
@@ -254,9 +264,10 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
             formatter.dateFormat = view.dateFormat
             reloadVisible = true
         }
-        if view.refs != refs {
+        if view.refs != refs || view.pullRequests != pullRequests {
             refs = view.refs
-            badges = view.refs.map(RefBadge.badges(for:)) ?? [:]
+            pullRequests = view.pullRequests
+            badges = view.refs.map { RefBadge.badges(for: $0, pullRequests: pullRequests) } ?? [:]
             reloadVisible = true
         }
         let wip = view.status.map(Self.wipDetail)
@@ -570,6 +581,15 @@ final class GraphTableController: NSObject, NSTableViewDataSource, NSTableViewDe
         guard let item = item(at: row) else { return nil }
         let entries = view.menuEntries(item, badge(at: point))
         return entries.isEmpty ? nil : MenuBuilder.menu(entries)
+    }
+
+    /// Opens the pull request whose chip is at `point` (in the table); false when there is none.
+    func openPullRequest(at point: NSPoint) -> Bool {
+        guard let table, let view, let cell = cell(at: point),
+              let pull = cell.pullRequest(at: cell.convert(point, from: table))
+        else { return false }
+        view.onOpenPullRequest(pull.number)
+        return true
     }
 
     /// The badge drawn at `point` (in the table).

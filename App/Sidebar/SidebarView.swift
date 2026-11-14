@@ -1,5 +1,5 @@
 // A repo tab's sidebar (panel 1): tabs Branches (Local, Remote and Worktrees cards, ahead/behind counts), Tags, and
-// Pull requests & Issues (a hint until GitHub is connected, Phase 11). Each section is its own collapsible card. A click
+// Pull requests & Issues (`PullRequestSections`: the GitHub lists, or the Connect card). Each section is its own collapsible card. A click
 // selects a row at once and the graph jumps to its commit; a double-click checks it out (the single click never waits
 // for it); a right-click opens the same menu as its badge in the graph. The Remote card's header menu adds a remote and
 // renames, removes, re-points or mirrors one. The Worktrees card lists the repo's worktrees (branch or HEAD, a pencil
@@ -60,8 +60,8 @@ enum SidebarItem: Hashable, Sendable {
     }
 }
 
-/// Sizes of the sidebar.
-private enum SidebarMetrics {
+/// Sizes of the sidebar (the PRs tab's rows use them too).
+enum SidebarMetrics {
     /// Between two section cards, and above the first one.
     static let cardSpacing = SectionCardMetrics.spacing
     /// Inside a section card, around its rows.
@@ -117,7 +117,7 @@ struct SidebarView: View {
     private var sections: some View {
         switch (session.sidebarTab, session.refs) {
         case (.prs, _):
-            PullRequestsHint()
+            PullRequestSections(session: session)
         case (.branches, .loaded(let refs)):
             BranchSections(session: session, refs: refs)
                 .onAppear { UITiming.content("sidebar \(session.url.lastPathComponent)") }
@@ -370,7 +370,7 @@ extension SidebarSection where Accessory == EmptyView {
 }
 
 /// The text of an empty section.
-private struct EmptyRow: View {
+struct EmptyRow: View {
     let text: String
 
     var body: some View {
@@ -484,29 +484,9 @@ private struct AheadBehind: View {
     }
 }
 
-/// Until Phase 11 connects GitHub: where to do it, in a card.
-private struct PullRequestsHint: View {
-    @Environment(WindowModel.self) private var model
-
-    var body: some View {
-        SectionCard("GitHub", systemImage: "person.crop.circle.badge.plus") {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Connect GitHub in Settings")
-                    .font(.body.weight(.medium))
-                Text("Pull requests and issues of this repository show here once a GitHub account is connected.")
-                    .font(.settingsCaption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Open Settings") { model.toggleSettings() }
-                    .buttonStyle(RowTextButtonStyle())
-            }
-        }
-    }
-}
-
 /// A section card's rows while the refs load: icon circles and name capsules of the given widths (a fraction of the
 /// row).
-private struct SkeletonRows: View {
+struct SkeletonRows: View {
     let fractions: [CGFloat]
 
     var body: some View {

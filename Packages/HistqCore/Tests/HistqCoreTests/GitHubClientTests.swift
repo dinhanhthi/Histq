@@ -126,6 +126,219 @@ struct GitHubClientTests {
         }
     }
 
+    // MARK: - Search
+
+    /// One `/search/issues` item as GitHub sends it: issue-shaped, with `pull_request` and `draft` for a PR.
+    static func searchJSON(number: Int, isPullRequest: Bool) -> String {
+        let pull = isPullRequest
+            ? #", "draft": true, "pull_request": {"url": "https://api.github.com/repos/octo/hello/pulls/\#(number)"}"#
+            : ""
+        return """
+            {"total_count": 1, "incomplete_results": false, "items": [
+             {"id": \(number), "number": \(number), "title": "Item \(number)", "state": "open",
+              "html_url": "https://github.com/octo/hello/issues/\(number)", "comments": 0,
+              "user": {"id": 1, "login": "octo"}, "labels": [], "updated_at": "2026-11-01T10:00:00Z"\(pull)}]}
+            """
+    }
+
+    enum SearchList: String, CaseIterable, Sendable {
+        case mine, reviewRequested, assigned
+    }
+
+    @Test("the My PRs, Review requested and Assigned lists search this repo for @me, with the token to the API host",
+          arguments: [
+              (SearchList.mine, "repo:octo/hello is:pr is:open author:@me", true),
+              (SearchList.reviewRequested, "repo:octo/hello is:pr is:open review-requested:@me", true),
+              (SearchList.assigned, "repo:octo/hello is:issue is:open assignee:@me", false),
+          ])
+    func searchListsQueryTheRepo(list: SearchList, query: String, isPullRequest: Bool) async throws {
+        let stub = StubServer { _ in .init(body: Self.searchJSON(number: 7, isPullRequest: isPullRequest)) }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let items = switch list {
+        case .mine: try await client.myOpenPullRequests(in: repo)
+        case .reviewRequested: try await client.reviewRequestedPullRequests(in: repo)
+        case .assigned: try await client.assignedOpenIssues(in: repo)
+        }
+
+        #expect(items.map(\.number) == [7])
+        #expect(items.first?.isPullRequest == isPullRequest)
+        #expect(items.first?.draft == (isPullRequest ? true : nil))
+        let request = try #require(stub.requests.first)
+        #expect(stub.requests.count == 1)
+        #expect(request.url?.host() == "api.github.com")
+        #expect(request.url?.path() == "/search/issues")
+        let queryItems = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(queryItems.first { $0.name == "q" }?.value == query)
+        #expect(queryItems.first { $0.name == "per_page" }?.value == "100")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+        #expect(request.url?.absoluteString.contains(Self.token) == false)
+    }
+
+    @Test("a search refuses a repository name that would add its own qualifiers, or a repo on another host")
+    func searchRefusesUnsafeRepository() async throws {
+        let stub = StubServer { _ in .init(body: Self.searchJSON(number: 1, isPullRequest: true)) }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+
+        let injected = HostedRepository(host: "github.com", owner: "octo", name: "hello is:closed repo:evil/x")
+        await #expect(throws: GitHubError.self) { try await client.myOpenPullRequests(in: injected) }
+        let otherHost = HostedRepository(host: "ghe.example.com", owner: "octo", name: "hello")
+        await #expect(throws: GitHubError.wrongHost("ghe.example.com")) {
+            try await client.assignedOpenIssues(in: otherHost)
+        }
+        #expect(stub.requests.isEmpty)
+    }
+
+    // MARK: - Merge
+
+    @Test("a merge pins the reviewed head: the body carries the method and the head sha")
+    func mergeSendsHeadSHA() async throws {
+        let stub = StubServer { _ in .init(body: #"{"sha": "cafe", "merged": true, "message": "Merged"}"#) }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        try await client.merge(7, in: repo, method: .squash, sha: "abc123")
+
+        let request = try #require(stub.requests.first)
+        #expect(stub.requests.count == 1)
+        #expect(request.httpMethod == "PUT")
+        #expect(request.url?.path() == "/repos/octo/hello/pulls/7/merge")
+        let body = try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+        #expect(body["merge_method"] as? String == "squash")
+        #expect(body["sha"] as? String == "abc123")
+    }
+
+    @Test("a merge GitHub refuses with 409 (the head moved) throws headChanged; another endpoint's 409 stays http")
+    func mergeConflictIsHeadChanged() async throws {
+        let stub = StubServer { _ in
+            .init(status: 409, body: #"{"message": "Head branch was modified. Review and try the merge again."}"#)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        await #expect(throws: GitHubError.headChanged) {
+            try await client.merge(7, in: repo, method: .merge, sha: "abc123")
+        }
+        #expect(GitHubError.headChanged.description == "The pull request's head changed: reload and review it again.")
+        await #expect(throws: GitHubError.http(
+            status: 409, message: "Head branch was modified. Review and try the merge again.")) {
+            try await client.setOpen(false, number: 7, in: repo)
+        }
+    }
+
+    // MARK: - Pull request commits and files
+
+    @Test("a PR's commits and files come from its endpoints; a file without a patch or a commit without an account decodes, and a patch parses as read-only hunks")
+    func pullRequestCommitsAndFiles() async throws {
+        let stub = StubServer { request in
+            if request.url?.path() == "/repos/octo/hello/pulls/7/commits" {
+                return .init(body: """
+                    [{"sha": "aaaa", "html_url": "https://github.com/octo/hello/commit/aaaa",
+                      "commit": {"message": "First\\n\\nBody", "author": {"name": "Octo", "email": "o@x.invalid",
+                                 "date": "2026-11-01T10:00:00Z"}}, "author": null}]
+                    """)
+            }
+            return .init(body: """
+                [{"filename": "src/new.swift", "status": "renamed", "previous_filename": "src/old.swift",
+                  "additions": 1, "deletions": 1, "changes": 2, "patch": "@@ -1,2 +1,2 @@ func a()\\n keep\\n-old\\n+new"},
+                 {"filename": "logo.png", "status": "added", "additions": 0, "deletions": 0, "changes": 0}]
+                """)
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let commits = try await client.pullRequestCommits(7, in: repo)
+        let files = try await client.pullRequestFiles(7, in: repo)
+
+        #expect(commits.map(\.sha) == ["aaaa"])
+        #expect(commits.first?.author == nil)
+        #expect(commits.first?.commit.author?.name == "Octo")
+        #expect(files.map(\.filename) == ["src/new.swift", "logo.png"])
+        #expect(files.last?.patch == nil)
+        #expect(files.last?.diff == nil)
+        let diff = try #require(files.first?.diff)
+        #expect(diff.change == .renamed)
+        #expect(diff.oldPath == "src/old.swift")
+        #expect(diff.newPath == "src/new.swift")
+        #expect(diff.hunks.count == 1)
+        #expect(diff.hunks.first?.section == "func a()")
+        #expect(diff.hunks.first?.lines.map(\.kind) == [.context, .removed, .added])
+        #expect(diff.hunks.first?.lines.map(\.text) == ["keep", "old", "new"])
+        #expect((diff.additions, diff.deletions) == (1, 1))
+        #expect(stub.requests.map { $0.url?.path() } == ["/repos/octo/hello/pulls/7/commits", "/repos/octo/hello/pulls/7/files"])
+        for request in stub.requests {
+            #expect(request.url?.host() == "api.github.com")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+        }
+    }
+
+    // MARK: - Creating a pull request
+
+    @Test("a new PR's form reads the default branch, labels, assignable users and collaborators from the repo's endpoints")
+    func createFormListsComeFromTheirEndpoints() async throws {
+        let stub = StubServer { request in
+            switch request.url?.path() {
+            case "/repos/octo/hello": .init(body: #"{"full_name": "octo/hello", "default_branch": "trunk"}"#)
+            case "/repos/octo/hello/labels": .init(body: #"[{"name": "bug", "color": "d73a4a"}]"#)
+            case "/repos/octo/hello/assignees": .init(body: #"[{"id": 1, "login": "octo"}]"#)
+            default: .init(status: 403, headers: ["X-RateLimit-Remaining": "4000"],
+                           body: #"{"message": "Must have push access to view repository collaborators."}"#)
+            }
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        #expect(try await client.repositoryInfo(repo).defaultBranch == "trunk")
+        #expect(try await client.labels(in: repo).map(\.name) == ["bug"])
+        #expect(try await client.assignableUsers(in: repo).map(\.login) == ["octo"])
+        // A token without push access: the form leaves the reviewers out instead of failing.
+        await #expect(throws: GitHubError.forbidden(message: "Must have push access to view repository collaborators.")) {
+            try await client.collaborators(in: repo)
+        }
+        #expect(stub.requests.map { $0.url?.path() } == [
+            "/repos/octo/hello", "/repos/octo/hello/labels", "/repos/octo/hello/assignees",
+            "/repos/octo/hello/collaborators",
+        ])
+    }
+
+    @Test("after a create, reviewers, labels and assignees are POSTed to their endpoints with GitHub's body keys")
+    func createFollowUpsPostTheirBodies() async throws {
+        let stub = StubServer { request in
+            request.url?.path().hasSuffix("/labels") == true
+                ? .init(body: #"[{"name": "bug"}]"#)
+                : .init(status: 201, body: Self.pullJSON(7))
+        }
+        let client = try GitHubClient(token: Self.token, session: stub.session)
+        let repo = HostedRepository(host: "github.com", owner: "octo", name: "hello")
+
+        let created = try await client.createPullRequest(
+            NewPullRequest(title: "Add a", head: "feature/a", base: "main", body: "Why", draft: true), in: repo)
+        try await client.requestReviewers(["alice", "bob"], on: created.number, in: repo)
+        try await client.addLabels(["bug"], to: created.number, in: repo)
+        try await client.addAssignees(["octo"], to: created.number, in: repo)
+
+        let requests = stub.requests
+        #expect(requests.map { $0.httpMethod } == ["POST", "POST", "POST", "POST"])
+        #expect(requests.map { $0.url?.path() } == [
+            "/repos/octo/hello/pulls", "/repos/octo/hello/pulls/7/requested_reviewers",
+            "/repos/octo/hello/issues/7/labels", "/repos/octo/hello/issues/7/assignees",
+        ])
+        let bodies = try requests.map { request in
+            try #require(JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: Any])
+        }
+        #expect(bodies[0]["head"] as? String == "feature/a")
+        #expect(bodies[0]["base"] as? String == "main")
+        #expect(bodies[0]["draft"] as? Bool == true)
+        #expect(bodies[1]["reviewers"] as? [String] == ["alice", "bob"])
+        #expect(bodies[2]["labels"] as? [String] == ["bug"])
+        #expect(bodies[3]["assignees"] as? [String] == ["octo"])
+        for request in requests {
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(Self.token)")
+            #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+        }
+    }
+
     // MARK: - Remote URLs
 
     @Test("remote URLs resolve to host/owner/repo, Enterprise scp-style ones included", arguments: [

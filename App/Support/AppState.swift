@@ -153,7 +153,7 @@ enum PrefKey: String, CaseIterable {
 /// `settings:profiles`). The window routes it through the same `select` path a click takes.
 struct SelectRequest: Equatable, Sendable {
     enum Kind: String, CaseIterable, Sendable {
-        case tab, wip, commit, branch, file, conflict, commitfile, settings, sidebar, pr
+        case tab, wip, commit, branch, file, conflict, commitfile, settings, sidebar, pr, issue, prbadge
     }
 
     let kind: Kind

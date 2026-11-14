@@ -250,8 +250,9 @@ private struct DiffContent: View {
     }
 }
 
-/// A card with a message instead of lines (binary, too large, no change, a failed read), and an optional action.
-private struct DiffNoticeCard<Action: View>: View {
+/// A card with a message instead of lines (binary, too large, no change, a failed read), and an optional action. The
+/// PR detail's Files changed tab uses it too.
+struct DiffNoticeCard<Action: View>: View {
     let title: String
     let systemImage: String
     let message: String
@@ -272,7 +273,7 @@ private struct DiffNoticeCard<Action: View>: View {
     }
 }
 
-private extension DiffNoticeCard where Action == EmptyView {
+extension DiffNoticeCard where Action == EmptyView {
     init(title: String, systemImage: String, message: String) {
         self.init(title: title, systemImage: systemImage, message: message) { EmptyView() }
     }
