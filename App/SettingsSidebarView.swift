@@ -52,7 +52,7 @@ struct SettingsModal: View {
 /// A sidebar section. Adding one: a case (its raw value is the `-HistqSelect settings:<section>` value), its row in
 /// `label`, its page in `SettingsSidebarView.content`.
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, appearance, profiles, ssh, integrations
+    case general, appearance, profiles, ssh, integrations, ai
 
     var id: Self { self }
 
@@ -63,6 +63,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .profiles: ("Profiles", "person.crop.circle")
         case .ssh: ("SSH", "key")
         case .integrations: ("Integrations", "link")
+        case .ai: ("AI", "sparkles")
         }
     }
 }
@@ -199,6 +200,7 @@ struct SettingsSidebarView: View {
             }
         case .integrations:
             IntegrationsSettings(profileID: $profileID, onShowProfiles: { model.selectSettings(.profiles) })
+        case .ai: AISettings()
         }
     }
 }

@@ -368,8 +368,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
+        let model = entries.first { $0.window === window }?.model
         // An open palette holds row closures over the window's sessions; drop it so they are freed with the window.
-        entries.first { $0.window === window }?.model.closePalette()
+        model?.closePalette()
+        // The closed window's views can keep its sessions (and their AI runs) alive a while: a running AI job stops
+        // now, before it sends the diff.
+        model?.sessions.values.forEach { $0.closeAI() }
         entries.removeAll { $0.window === window }
         SessionStore.schedule()
     }

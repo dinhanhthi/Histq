@@ -1,5 +1,6 @@
 // A commit or a stash in the detail panel, its parts in cards: the commit info (subject, body, author and
-// committer with their avatars, date, sha with a copy button, parents that jump to their row), then its files.
+// committer with their avatars, date, sha with a copy button, parents that jump to their row, and the AI button
+// Explain), then its files.
 import AppKit
 import Combine
 import SwiftUI
@@ -109,6 +110,14 @@ private struct CommitInfoCard: View {
                 }
                 ShaRow(hash: commit.hash)
                 parentsRow
+            }
+        } accessory: {
+            // AI (task 12.3): opens the result card; nothing is sent before the click.
+            AIHookButton(title: "Explain", systemImage: "sparkles",
+                         help: commit.isStash ? "Explain this stash with AI" : "Explain this commit with AI",
+                         seam: "explain") {
+                let message = commit.body.isEmpty ? commit.subject : commit.subject + "\n\n" + commit.body
+                session.startAI(.explainCommit(hash: commit.hash, message: message))
             }
         }
     }

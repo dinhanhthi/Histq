@@ -91,6 +91,27 @@ public struct ThreeWayMerge: Sendable, Hashable {
     /// Output's bytes, the content to save: base/A/B lines keep their original bytes.
     public var outputData: Data { Data(outputBytes.joined()) }
 
+    /// The file's line break: "\r\n" when most of A's and B's lines end with CRLF, else "\n" (a suggested resolution
+    /// is converted to it).
+    public var lineBreak: String {
+        var crlf = 0
+        var lf = 0
+        for line in aBytes + bBytes where line.last == 0x0A {
+            if line.dropLast().last == 0x0D { crlf += 1 } else { lf += 1 }
+        }
+        return crlf > lf ? "\r\n" : "\n"
+    }
+
+    /// Whether region `index`'s Output must end with a line break: Output lines follow it, or it ends the file and
+    /// its sides end with one. A file without a final newline must not gain one (`render` only adds a break before
+    /// a following line).
+    public func needsFinalBreak(region index: Int) -> Bool {
+        if regions[(index + 1)...].contains(where: { !$0.output.isEmpty }) { return true }
+        let region = regions[index]
+        let last = region.a.last.map { aBytes[$0] } ?? region.b.last.map { bBytes[$0] }
+        return last?.last == 0x0A
+    }
+
     public func isTicked(_ side: Side, line: Int) -> Bool {
         side == .a ? tickedA.contains(line) : tickedB.contains(line)
     }

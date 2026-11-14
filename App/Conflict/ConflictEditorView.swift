@@ -1,8 +1,8 @@
 // A conflicted file in panel2, in place of the graph (GitKraken's layout), each part in its own card: the header (the
 // file, its conflict count, the encoding, "Open in external merge tool", Save, close), then panes A and B side by
 // side in one card (the two sides' whole files, conflict lines tinted with checkboxes) above Output (the merge,
-// editable, with "conflict k of N"). A binary file or a file deleted on one side gets a chooser card instead. The
-// stages load off the main actor; until then the cards are skeletons.
+// editable, with "conflict k of N" and the AI button Suggest Resolution). A binary file or a file deleted on one side
+// gets a chooser card instead. The stages load off the main actor; until then the cards are skeletons.
 import HistqCore
 import SwiftUI
 
@@ -310,6 +310,14 @@ private struct ConflictOutputCard: View {
                         .font(.body.weight(.semibold))
                     Spacer(minLength: 8)
                     if count > 0 {
+                        // AI (task 12.3): replaces only this conflict's Output, as a manual edit, once applied.
+                        AIHookButton(title: "Suggest Resolution", systemImage: "sparkles",
+                                     help: "Suggest a resolution of conflict \(current + 1) with AI",
+                                     unavailable: unavailableReason, seam: "resolve") {
+                            if let target = session.aiResolutionTarget() { session.startAI(.resolution(target)) }
+                        }
+                    }
+                    if count > 0 {
                         Text("conflict \(current + 1) of \(count)")
                             .monospacedDigit()
                             .foregroundStyle(Color(nsColor: Palette.conflictA))
@@ -335,6 +343,13 @@ private struct ConflictOutputCard: View {
                     .frame(maxHeight: .infinity)
             }
         }
+    }
+
+    /// Suggest Resolution needs an editable Output and a free editor.
+    private var unavailableReason: String? {
+        if !document.isUTF8 { return "Output is read-only: the file is not UTF-8" }
+        if session.conflictBusy != nil { return "Wait for the save to finish" }
+        return nil
     }
 
     private func navigationButton(_ systemImage: String, help: String, to k: Int, count: Int) -> some View {

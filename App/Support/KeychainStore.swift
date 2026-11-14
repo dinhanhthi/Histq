@@ -31,6 +31,8 @@ struct KeychainError: Error, Equatable, Sendable, CustomStringConvertible {
 /// Where items live: the login keychain, or the in-memory twin of QA runs and the DEBUG self-test.
 protocol KeychainBackend: Sendable {
     func read(service: String, account: String) -> KeychainRead
+    /// Whether the item exists, without reading its data: `errSecSuccess`, `errSecItemNotFound`, or the failure.
+    func contains(service: String, account: String) -> OSStatus
     /// Replaces the item's data, or adds the item when it does not exist.
     func upsert(service: String, account: String, data: Data) -> OSStatus
     /// `errSecSuccess` also when there was no such item.
@@ -66,6 +68,13 @@ struct LoginKeychainBackend: KeychainBackend {
         }
     }
 
+    func contains(service: String, account: String) -> OSStatus {
+        // No kSecReturnData: the secret is never decrypted or copied into the process for an existence check.
+        var query = query(service: service, account: account)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(query as CFDictionary, nil)
+    }
+
     func upsert(service: String, account: String, data: Data) -> OSStatus {
         let query = query(service: service, account: account)
         let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
@@ -92,6 +101,10 @@ final class InMemoryKeychainBackend: KeychainBackend {
 
     func read(service: String, account: String) -> KeychainRead {
         items.withLock { $0[Key(service: service, account: account)] }.map { .found($0) } ?? .notFound
+    }
+
+    func contains(service: String, account: String) -> OSStatus {
+        items.withLock { $0[Key(service: service, account: account)] != nil } ? errSecSuccess : errSecItemNotFound
     }
 
     func upsert(service: String, account: String, data: Data) -> OSStatus {
@@ -136,6 +149,16 @@ struct KeychainStore: Sendable {
             return nil
         case .failed(let status):
             throw KeychainError(status: status)
+        }
+    }
+
+    /// Whether there is an item, its value unread. Throws `KeychainError` when the lookup failed.
+    func contains(account: String) throws -> Bool {
+        assertOffMain()
+        switch backend.contains(service: service, account: account) {
+        case errSecSuccess: return true
+        case errSecItemNotFound: return false
+        case let status: throw KeychainError(status: status)
         }
     }
 
@@ -213,9 +236,9 @@ enum GitHubTokens {
 }
 
 #if DEBUG
-/// DEBUG `-HistqKeychainSelfTest memory|login`: a save, read, overwrite and delete round trip against the in-memory
-/// twin and, with `login` in state-dir mode, the login keychain under the QA service with a throwaway account that
-/// is deleted again. Off the main thread; the outcome (status lines only, never a value) goes to
+/// DEBUG `-HistqKeychainSelfTest memory|login`: a save, read, exists, overwrite and delete round trip against the
+/// in-memory twin and, with `login` in state-dir mode, the login keychain under the QA service with a throwaway
+/// account that is deleted again. Off the main thread; the outcome (status lines only, never a value) goes to
 /// `keychain-selftest.txt` in the state folder. The app has no test target: this checks the real signed app's access.
 enum KeychainSelfTest {
     static func runIfAsked() {
@@ -240,12 +263,15 @@ enum KeychainSelfTest {
         let second = UUID().uuidString
         do {
             guard try store.string(account: account) == nil else { return "fail: item existed before" }
+            guard try !store.contains(account: account) else { return "fail: contains before save" }
             try store.setString(first, account: account)
+            guard try store.contains(account: account) else { return "fail: contains after save" }
             guard try store.string(account: account) == first else { return "fail: read after save" }
             try store.setString(second, account: account)
             guard try store.string(account: account) == second else { return "fail: read after overwrite" }
             try store.delete(account: account)
             guard try store.string(account: account) == nil else { return "fail: item left after delete" }
+            guard try !store.contains(account: account) else { return "fail: contains after delete" }
             try store.delete(account: account)
             return "ok (\(account))"
         } catch {

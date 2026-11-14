@@ -120,6 +120,12 @@ enum PrefKey: String, CaseIterable {
     case recentRepos
     /// The detail panel's file lists: "path" (one row per file) or "tree" (rows under their folders).
     case fileListMode
+    /// The AI provider the hooks use: an `AIProvider` raw value ("openAI", "anthropic", "gemini", "xAI", "custom").
+    case aiProvider
+    /// The model of each AI provider, by `AIProvider` raw value; a missing or empty one = the provider's default.
+    case aiModels
+    /// The custom AI provider's base URL as typed (validated with `AIEndpoint.normalize` where it is used).
+    case aiCustomBaseURL
 
     /// The value a key has until the user sets it.
     var defaultValue: Any {
@@ -145,6 +151,9 @@ enum PrefKey: String, CaseIterable {
         case .terminalOpenWithNewTab: false
         case .recentRepos: [String]()
         case .fileListMode: "path"
+        case .aiProvider: "openAI"
+        case .aiModels: [String: String]()
+        case .aiCustomBaseURL: ""
         }
     }
 }

@@ -411,11 +411,13 @@ final class RepoSession: Identifiable {
     var worktreeForm: WorktreeForm?
     /// The Create Pull Request form (`CreatePRView`).
     var pullRequestForm: PullRequestForm?
+    /// The AI result card (`AIResultSheet`, task 12.3): the job it shows, running or finished.
+    private(set) var aiRun: AIRun?
 
     /// A form, confirmation, host-key or rebase modal is open (`ModalHost` shows it over the window).
     var hasModal: Bool {
         dialog != nil || confirmation != nil || hostKeyCheck != nil || rebaseRequest != nil || worktreeForm != nil
-            || pullRequestForm != nil
+            || pullRequestForm != nil || aiRun != nil
     }
 
     /// Cancels every open modal, as their Cancel buttons do (a tab or page change).
@@ -426,6 +428,7 @@ final class RepoSession: Identifiable {
         rebaseRequest = nil
         worktreeForm = nil
         pullRequestForm = nil
+        closeAI()
     }
     /// The undo journal's next entries, read with the refs; the toolbar, the Edit menu and the palette show them.
     private(set) var undoStatus = UndoStatus()
@@ -646,6 +649,9 @@ final class RepoSession: Identifiable {
         preferencesObserver = nil
         profileTask?.cancel()
         github.stop()
+        // The tab is removed before the selection moves, so `ModalHost` never closes its modals: a running AI job
+        // must stop here, before it sends the diff.
+        closeAI()
     }
 
     // MARK: Profile
@@ -1837,6 +1843,102 @@ final class RepoSession: Identifiable {
         conflictError = nil
         let name = (target.path as NSString).lastPathComponent
         run(.mergeTool(path: target.path, tool: setting.isEmpty ? nil : setting), title: "Merge tool for \(name)")
+    }
+
+    // MARK: AI (task 12.3)
+
+    /// An AI button's click: the result card opens in this call (its skeleton shows in the click's frame); the job's
+    /// content is read and its prompt built off the main actor, then the answer streams in. Only a click gets here.
+    func startAI(_ job: AIJob) {
+        aiRun?.cancel()
+        let setup = AISetup.shared
+        let run = AIRun(job: job, provider: setup.provider, model: setup.model(for: setup.provider))
+        UITiming.select("ai \(job.logName)")
+        aiRun = run
+        let url = url
+        run.start { [weak self] in
+            guard let backend = try await self?.backend() else { throw CancellationError() }
+            return try await Self.aiPrompt(job, backend: backend, cwd: url)
+        }
+    }
+
+    /// Cancel, Escape, Close, Apply, a tab or page change, closing the tab or window: stops the stream (if any) and
+    /// closes the card.
+    func closeAI() {
+        aiRun?.cancel()
+        aiRun = nil
+    }
+
+    /// The job's prompt: the staged, WIP or commit diff read with the read environment (never a profile), cut to the
+    /// prompt's budget. A resolution's text was taken at the click.
+    @concurrent
+    private nonisolated static func aiPrompt(_ job: AIJob, backend: Backend, cwd: URL) async throws -> AIPrompt {
+        switch job {
+        case .commitMessage:
+            let env = try await backend.readEnvironment(cwd: cwd)
+            let diff = try await DiffReader.patchText(.staged, runner: backend.runner, cwd: cwd, env: env)
+            guard !diff.isEmpty else { throw AIJobError.nothingStaged }
+            return AIPrompts.commitMessage(stagedDiff: diff)
+        case .explainCommit(let hash, let message):
+            guard GitOperations.isObjectID(hash) else { throw AIJobError.noChanges }
+            let env = try await backend.readEnvironment(cwd: cwd)
+            let diff = try await DiffReader.patchText(.commit(hash), runner: backend.runner, cwd: cwd, env: env)
+            return AIPrompts.explainCommit(message: message, diff: diff)
+        case .explainWorkingChanges:
+            // Staged then unstaged: `git diff HEAD` would fail on an unborn branch.
+            let env = try await backend.readEnvironment(cwd: cwd)
+            async let staged = DiffReader.patchText(.staged, runner: backend.runner, cwd: cwd, env: env)
+            async let unstaged = DiffReader.patchText(.unstaged, runner: backend.runner, cwd: cwd, env: env)
+            let diff = try await staged + unstaged
+            guard !diff.isEmpty else { throw AIJobError.noChanges }
+            return AIPrompts.explainWorkingChanges(diff: diff)
+        case .resolution(let target):
+            return AIPrompts.suggestResolution(path: target.path, base: target.base, a: target.a, b: target.b)
+        }
+    }
+
+    /// Apply of a commit message: its first line is the summary, the rest (after the blank line) the description.
+    func applyAICommitMessage(_ message: String) {
+        var lines = message.split(separator: "\n", omittingEmptySubsequences: false).map {
+            $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+        }
+        let summary = lines.isEmpty ? "" : lines.removeFirst().trimmingCharacters(in: .whitespaces)
+        while lines.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { lines.removeFirst() }
+        commitDraft.summary = summary
+        commitDraft.description = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The open conflict's current region ("conflict k of N") for Suggest Resolution; nil when there is none (not a
+    /// text conflict, not UTF-8, so Output is read-only, or not loaded).
+    func aiResolutionTarget() -> AIResolutionTarget? {
+        guard case .loaded(let document) = conflict, document.isUTF8, let merge = document.merge,
+              let path = openFile?.path, merge.conflictCount > 0
+        else { return nil }
+        let k = min(document.current, merge.conflictCount - 1)
+        let index = merge.conflictRegions[k]
+        let region = merge.regions[index]
+        let hasBase = if case .text(let base, _, _) = document.source.content { base != nil } else { false }
+        return AIResolutionTarget(
+            path: path, loadID: document.loadID, conflict: k, region: index,
+            base: hasBase ? merge.baseLines[region.base].joined() : nil,
+            a: merge.aLines[region.a].joined(), b: merge.bLines[region.b].joined(),
+            lineBreak: merge.lineBreak, needsFinalBreak: merge.needsFinalBreak(region: index))
+    }
+
+    /// Apply of a suggested resolution: replaces only the target region's Output, as a manual edit, with the file's
+    /// line breaks. Never saves or stages (Save does, once every conflict is resolved). Returns why it could not, when
+    /// the editor no longer shows that load of that file or that conflict.
+    func applyAIResolution(_ answer: String, to target: AIResolutionTarget) -> String? {
+        guard case .loaded(let document) = conflict, document.loadID == target.loadID, openFile?.path == target.path,
+              let merge = document.merge, merge.conflictRegions.indices.contains(target.conflict),
+              merge.conflictRegions[target.conflict] == target.region
+        else { return "The conflict editor changed since the suggestion was asked for. Ask again." }
+        updateConflict { document in
+            let text = AIPrompts.resolutionText(answer, lineBreak: target.lineBreak, finalBreak: target.needsFinalBreak)
+            document.merge?.setManualText(text, region: target.region)
+            document.current = target.conflict
+        }
+        return nil
     }
 
     /// Writes a resolution into the working tree: atomically (a temporary file renamed over the old one, so a crash

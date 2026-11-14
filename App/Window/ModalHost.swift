@@ -44,6 +44,7 @@ struct ModalHost: View {
         case rebase(RepoSession, RebaseRequest)
         case worktree(RepoSession, WorktreeForm)
         case pullRequest(RepoSession, PullRequestForm)
+        case ai(RepoSession, AIRun)
 
         var id: String {
             switch self {
@@ -54,6 +55,7 @@ struct ModalHost: View {
             case .rebase(_, let request): "rebase \(request.id)"
             case .worktree(_, let form): "worktree \(form.id)"
             case .pullRequest(_, let form): "pull request \(form.id)"
+            case .ai(_, let run): "ai \(run.id)"
             }
         }
 
@@ -76,6 +78,7 @@ struct ModalHost: View {
         if let request = session.rebaseRequest { return .rebase(session, request) }
         if let form = session.worktreeForm { return .worktree(session, form) }
         if let form = session.pullRequestForm { return .pullRequest(session, form) }
+        if let run = session.aiRun { return .ai(session, run) }
         return nil
     }
 
@@ -147,6 +150,8 @@ struct ModalHost: View {
             AddWorktreeView(session: session, form: form) { session.worktreeForm = nil }
         case .pullRequest(let session, let form):
             CreatePRView(session: session, form: form) { session.pullRequestForm = nil }
+        case .ai(let session, let run):
+            AIResultSheet(session: session, run: run) { session.closeAI() }
         }
     }
 
@@ -159,6 +164,7 @@ struct ModalHost: View {
         case .rebase(let session, _): session.rebaseRequest = nil
         case .worktree(let session, _): session.worktreeForm = nil
         case .pullRequest(let session, _): session.pullRequestForm = nil
+        case .ai(let session, _): session.closeAI()
         }
     }
 }

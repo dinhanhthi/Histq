@@ -1,5 +1,5 @@
 // The working tree in the detail panel, each part in its own card: the conflicted files (open the conflict editor,
-// stage), the unstaged files (stage, discard), the staged files (unstage), and the commit box (summary with a 72-character counter, description, Amend, Commit / ⌘↩).
+// stage), the unstaged files (stage, discard), the staged files (unstage), and the commit box (summary with a 72-character counter, description, Amend, Commit / ⌘↩, and the AI buttons Explain and Generate Message).
 // Every write goes through `RepoSession.perform` (write environment, off the main actor); the control that started
 // it shows a spinner at once, and an error shows in its card.
 import HistqCore
@@ -49,7 +49,8 @@ struct WIPPanel: View {
             if conflicted.isEmpty && unstaged.isEmpty && staged.isEmpty {
                 Spacer(minLength: 0)
             }
-            CommitBox(session: session, stagedCount: staged.count, busy: $busy, error: errorBinding(.commit))
+            CommitBox(session: session, stagedCount: staged.count, changeCount: staged.count + unstaged.count,
+                      busy: $busy, error: errorBinding(.commit))
         }
     }
 
@@ -282,6 +283,8 @@ struct WIPPlaceholder: View {
 private struct CommitBox: View {
     let session: RepoSession
     let stagedCount: Int
+    /// Staged and unstaged files: Explain needs at least one.
+    let changeCount: Int
     @Binding var busy: Set<WIPPanel.Busy>
     @Binding var error: String?
 
@@ -335,6 +338,19 @@ private struct CommitBox: View {
                     .help("Commit (⌘↩)")
                 }
                 ErrorText(message: error)
+            }
+        } accessory: {
+            // AI (task 12.3): each opens the result card; nothing is sent before the click.
+            HStack(spacing: 6) {
+                AIHookButton(title: "Explain", help: "Explain the uncommitted changes with AI",
+                             unavailable: changeCount == 0 ? "No changes to explain" : nil, seam: "explain-wip") {
+                    session.startAI(.explainWorkingChanges)
+                }
+                AIHookButton(title: "Generate Message", systemImage: "sparkles",
+                             help: "Write a commit message for the staged changes with AI",
+                             unavailable: stagedCount == 0 ? "Stage changes first" : nil, seam: "generate") {
+                    session.startAI(.commitMessage)
+                }
             }
         }
     }

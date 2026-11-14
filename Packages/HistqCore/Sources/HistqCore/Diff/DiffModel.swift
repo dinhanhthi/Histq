@@ -193,6 +193,25 @@ public enum DiffReader {
         try await run(fileArguments(at: revision, path: path), runner: runner, cwd: cwd, env: env).stdout
     }
 
+    /// Which diff `patchText` reads: the same ones as `staged`, `unstaged` and `commit`.
+    public enum PatchSource: Sendable, Equatable {
+        case staged, unstaged
+        case commit(String)
+    }
+
+    /// A diff as patch text, with the same arguments as the parsed loaders (so the same hardening): the AI prompts
+    /// send the diff as text. Invalid UTF-8 shows as U+FFFD.
+    public static func patchText(
+        _ source: PatchSource, runner: GitRunner, cwd: URL, env: [String: String]
+    ) async throws -> String {
+        let args = switch source {
+        case .staged: stagedArguments(paths: [], context: nil)
+        case .unstaged: unstagedArguments(paths: [], context: nil)
+        case .commit(let revision): commitArguments(revision, paths: [], context: nil)
+        }
+        return try await run(args, runner: runner, cwd: cwd, env: env).text
+    }
+
     // MARK: Arguments
 
     /// Pins the output format against the repo's config (`color.*`, `diff.noprefix`, `diff.mnemonicPrefix`,
