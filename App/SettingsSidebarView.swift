@@ -52,7 +52,7 @@ struct SettingsModal: View {
 /// A sidebar section. Adding one: a case (its raw value is the `-HistqSelect settings:<section>` value), its row in
 /// `label`, its page in `SettingsSidebarView.content`.
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, appearance, profiles, ssh
+    case general, appearance, profiles, ssh, integrations
 
     var id: Self { self }
 
@@ -62,6 +62,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .appearance: ("Appearance", "paintbrush")
         case .profiles: ("Profiles", "person.crop.circle")
         case .ssh: ("SSH", "key")
+        case .integrations: ("Integrations", "link")
         }
     }
 }
@@ -71,7 +72,7 @@ struct SettingsSidebarView: View {
     /// Sections whose page is built: kept alive like TabView's tabs, so a section keeps its state (and its scroll)
     /// when the user comes back to it. A section joins just after its first select (`onChange(of: section)`).
     @State private var opened: Set<SettingsSection> = []
-    /// The profile the Profiles and SSH pages edit, shared so both show the same one.
+    /// The profile the Profiles, SSH and Integrations pages edit, shared so all show the same one.
     @State private var profileID: UUID?
     @FocusState private var sidebarFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -196,6 +197,8 @@ struct SettingsSidebarView: View {
             SSHSettings(profileID: $profileID, onShowProfiles: { model.selectSettings(.profiles) }) { id in
                 model.presentModal(.generateKey(profileID: id))
             }
+        case .integrations:
+            IntegrationsSettings(profileID: $profileID, onShowProfiles: { model.selectSettings(.profiles) })
         }
     }
 }

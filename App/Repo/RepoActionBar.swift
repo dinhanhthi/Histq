@@ -230,6 +230,17 @@ struct ActionErrorBanner: View {
             return Hint(text: "The worktree has uncommitted changes or untracked files.",
                         action: .forceRemoveWorktree(path))
         }
+        if let withheld = failure.error as? NetworkTokenWithheld {
+            switch withheld.reason {
+            case .repoNetworkConfig(let keys):
+                return Hint(text: "This repository sets its own network settings (\(keys.joined(separator: ", "))), "
+                    + "so Histq did not send your GitHub token. Remove them from its config, or sign in with a "
+                    + "credential helper of your own.")
+            case .submoduleRecursion(let keys):
+                return Hint(text: "Submodule recursion is on (\(keys.joined(separator: ", "))), so Histq did not send "
+                    + "your GitHub token. Turn it off, or sign in with a credential helper of your own.")
+            }
+        }
         guard let error = failure.error as? GitError else { return Hint() }
         switch error {
         case .auth:

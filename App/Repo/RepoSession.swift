@@ -339,6 +339,14 @@ final class RepoSession: Identifiable {
             default: nil
             }
         }
+
+        /// The writes that talk to a remote: the only ones that read the profile's GitHub token.
+        var isNetwork: Bool {
+            switch self {
+            case .fetchAll, .pull, .push, .pushTag, .pushMirror, .deleteRemoteBranch, .deleteRemoteTag: true
+            default: false
+            }
+        }
     }
 
     let id = UUID()
@@ -741,8 +749,10 @@ final class RepoSession: Identifiable {
     private nonisolated static func autoFetch(prune: Bool, profile: Profile?, backend: Backend, cwd: URL) async throws {
         let base = await GitToolchain.writeBase()
         let runner = backend.runner
+        // Passed to the gate: it reaches git only when every remote is https on the profile's host.
+        let token = await GitHubTokens.token(for: profile)
         let environment = try await GitInvocation.backgroundFetchEnvironment(
-            profile: profile, base: base, runner: runner, cwd: cwd)
+            profile: profile, base: base, runner: runner, cwd: cwd, token: token)
         let args = ["fetch", "--all"] + (prune ? ["--prune"] : [])
         _ = try await runner.mutate {
             try await runner.run(args, cwd: cwd, env: environment, timeout: .seconds(120))
@@ -2257,9 +2267,14 @@ final class RepoSession: Identifiable {
     @concurrent
     private nonisolated static func run(_ write: Write, profile: Profile?, backend: Backend, cwd: URL) async throws {
         let base = await GitToolchain.writeBase()
+        // The profile's GitHub token, from the Keychain off the main actor (cached), for network writes alone: their
+        // operations hand it to git only when the gate lets them (`GitInvocation.networkToken`).
+        let token = write.isNetwork ? await GitHubTokens.token(for: profile) : nil
         // The tab's identity, signing and SSH key, as command-scope config: `.git/config` is never edited.
-        let environment = GitInvocation.environment(profile: profile, base: base)
-        let ops = GitOperations(runner: backend.runner, cwd: cwd, env: environment, journal: backend.journal)
+        let ops = GitOperations(
+            runner: backend.runner, cwd: cwd, profile: profile, base: base, token: token, journal: backend.journal)
+        // Local writes (patches, the merge tool) never get the token.
+        let environment = ops.env
         switch write {
         case .stage(let paths): try await ops.stage(paths)
         case .stageAll: try await ops.stageAll()
@@ -2606,6 +2621,9 @@ final class RepoSession: Identifiable {
         case GitInvocation.BackgroundFetchError.repoSetsNetworkConfig(let keys):
             "The repo sets its own http or proxy config (\(keys.joined(separator: ", "))); "
                 + "auto-fetch skipped, fetch manually."
+        case let error as NetworkTokenWithheld:
+            // Git's own words; the banner's hint says why the token was not sent.
+            error.error.stderrTail.isEmpty ? "git failed." : error.error.stderrTail
         case let error as HostKeyTrust.TrustError:
             switch error {
             case .invalidHost(let host): "\(host) is not a host name Histq can check."

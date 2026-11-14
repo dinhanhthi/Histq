@@ -19,6 +19,9 @@ enum HistqApp {
         Preferences.registerDefaults()
         // Read the profiles off the main thread now, so a repo opened later finds its profile in memory.
         ProfileLibrary.shared.loadIfNeeded()
+        #if DEBUG
+        KeychainSelfTest.runIfAsked()
+        #endif
         let app = NSApplication.shared
         app.delegate = delegate
         app.run()

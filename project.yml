@@ -28,6 +28,11 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "com.math2it.histq"
         GENERATE_INFOPLIST_FILE: YES
+        # Partial plist with the keys Xcode cannot generate (HistqGitHubClientID), merged with the generated ones.
+        INFOPLIST_FILE: App/Info.plist
+        # The client ID of the GitHub OAuth App used by "Sign in with GitHub" (device flow; a public value, no secret).
+        # Empty until one is registered: Settings › Integrations then shows how to set it, and paste/import still work.
+        HISTQ_GITHUB_CLIENT_ID: ""
         INFOPLIST_KEY_LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
         INFOPLIST_KEY_CFBundleDisplayName: "Histq"
         MARKETING_VERSION: 0.1.0

@@ -280,6 +280,200 @@ struct GitInvocationTests {
         }
     }
 
+    // MARK: - GitHub token
+
+    /// A made-up token; the tests look for it where it must never be. The hosts are `.invalid`, so no real
+    /// credential can ever answer for them.
+    static let token = "ghp_HistqFakeToken0123456789"
+    static let tokenHost = "git.histq.invalid"
+    static let tokenHelperKey = "credential.https://git.histq.invalid.helper"
+
+    static var tokenProfile: Profile {
+        var profile = profile
+        profile.github = .init(host: tokenHost, login: "octo")
+        profile.ssh = .keyFile(path: "/keys/id_ed25519")
+        return profile
+    }
+
+    /// The command-scope config entries of `env`, in order, as `key=value`.
+    static func configEntries(_ env: [String: String]) -> [String] {
+        (0..<(Int(env["GIT_CONFIG_COUNT"] ?? "") ?? 0)).map {
+            "\(env["GIT_CONFIG_KEY_\($0)"] ?? "")=\(env["GIT_CONFIG_VALUE_\($0)"] ?? "")"
+        }
+    }
+
+    /// A user helper in a temp global config (after a reset, so no system helper runs) that touches
+    /// `user-helper-ran` and answers `user`/`user-secret`; returns the base using it and the marker.
+    static func baseWithUserHelper(_ sandbox: Sandbox) throws -> (base: [String: String], marker: URL, helper: String) {
+        let marker = sandbox.root.appending(path: "user-helper-ran")
+        let script = sandbox.root.appending(path: "bin/user-helper.sh")
+        try Fixtures.writeScript(
+            "touch '\(marker.path)'\nprintf 'username=user\\npassword=user-secret\\n'", to: script)
+        let helper = "!'\(script.path)'"
+        let global = sandbox.root.appending(path: "home/.gitconfig")
+        try Data("[credential]\n\thelper =\n\thelper = \(helper)\n".utf8).write(to: global)
+        var base = sandbox.base
+        base["GIT_CONFIG_GLOBAL"] = global.path
+        return (base, marker, helper)
+    }
+
+    @Test("only network environments carry the token, in HISTQ_GIT_TOKEN alone; reads, writes and the terminal never")
+    func tokenOnlyInNetworkEnvironments() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        let profile = Self.tokenProfile
+        let ops = GitOperations(
+            runner: sandbox.runner, cwd: repo, profile: profile, base: sandbox.base, token: Self.token)
+
+        let network = GitInvocation.environment(
+            profile: profile, base: sandbox.base, access: .network(.fetch), token: Self.token)
+        // The operations hold the token for the gate only: no environment of theirs carries it.
+        #expect(ops.networkEnv == ops.env)
+        #expect(ops.credential?.token == Self.token)
+        #expect(network.filter { $0.value.contains(Self.token) }.map(\.key) == ["HISTQ_GIT_TOKEN"])
+        #expect(Self.configEntries(network).suffix(2) == [
+            "\(Self.tokenHelperKey)=", "\(Self.tokenHelperKey)=\(GitInvocation.tokenHelper)",
+        ])
+        let networkKeys = try await sandbox.runner.run(
+            ["config", "--name-only", "--get-regexp", "^credential\\."], cwd: repo, env: network).text
+        #expect(networkKeys.contains(Self.tokenHelperKey), "positive control: git sees the helper")
+
+        let terminal = GitInvocation.terminalEnvironment(profile: profile)
+        #expect(Self.configEntries(terminal).contains("user.email=profile@histq.invalid"))
+        #expect(terminal["GIT_SSH_COMMAND"] == "ssh -i '/keys/id_ed25519' -o IdentitiesOnly=yes")
+        let others: [(String, [String: String])] = [
+            ("write", GitInvocation.environment(profile: profile, base: sandbox.base, access: .write, token: Self.token)),
+            ("read", GitInvocation.environment(
+                profile: profile, base: sandbox.base, access: .read(filterDrivers: []), token: Self.token)),
+            ("read in repo", try await GitInvocation.readEnvironment(
+                profile: profile, base: sandbox.base, runner: sandbox.runner, cwd: repo)),
+            ("operations write", ops.env),
+            ("operations network", ops.networkEnv),
+            ("terminal", terminal),
+        ]
+        for (name, env) in others {
+            #expect(env["HISTQ_GIT_TOKEN"] == nil, "\(name)")
+            #expect(!env.values.contains { $0.contains(Self.token) }, "\(name)")
+            #expect(!Self.configEntries(env).contains { $0.hasPrefix("credential.") }, "\(name)")
+            if name != "terminal" {
+                // Exit 1: no credential key in any scope.
+                let keys = try await sandbox.runner.run(
+                    ["config", "--get-regexp", "^credential\\."], cwd: repo, env: env, allowedExitCodes: [0, 1])
+                #expect(keys.exitCode == 1, "\(name): \(keys.text)")
+            }
+        }
+    }
+
+    /// The network side (fetch, pull and push hooks, with and without the token) is in NetworkTokenTests.
+    @Test("a commit's hooks never see the token")
+    func commitHooksDoNotSeeToken() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let repo = try await sandbox.makeRepo("repo")
+        let dumps = sandbox.root.appending(path: "dumps", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dumps, withIntermediateDirectories: true)
+        for hook in ["pre-commit", "commit-msg", "post-commit"] {
+            try Fixtures.writeScript("env > '\(dumps.appending(path: hook).path)'", to: repo.appending(path: ".git/hooks/\(hook)"))
+        }
+        let ops = GitOperations(
+            runner: sandbox.runner, cwd: repo, profile: Self.tokenProfile, base: sandbox.base, token: Self.token)
+
+        try Data("changed\n".utf8).write(to: repo.appending(path: "tracked.txt"))
+        try await ops.stage(["tracked.txt"])
+        try await ops.commit(message: "change")
+
+        for hook in ["pre-commit", "commit-msg", "post-commit"] {
+            let dump = try String(contentsOf: dumps.appending(path: hook), encoding: .utf8)
+            #expect(dump.contains("GIT_CONFIG_COUNT="), "the \(hook) hook ran")
+            #expect(!dump.contains("HISTQ_GIT_TOKEN") && !dump.contains(Self.token), "\(hook) saw the token")
+        }
+    }
+
+    @Test("git credential fill gives the token for the profile's host only, runs no other helper, and the token is in no argument")
+    func credentialFillIsScopedToTheHost() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let (base, userMarker, _) = try Self.baseWithUserHelper(sandbox)
+        let trace = sandbox.root.appending(path: "trace.txt")
+        var env = GitInvocation.environment(
+            profile: Self.tokenProfile, base: base, access: .network(.fetch), token: Self.token)
+        // GIT_TRACE logs the argv of every command git runs, the helper's shell included.
+        env["GIT_TRACE"] = trace.path
+        let fill = ["credential", "fill"]
+
+        let mine = try await sandbox.runner.run(
+            fill, cwd: sandbox.root, env: env, stdin: Data("protocol=https\nhost=\(Self.tokenHost)\n\n".utf8),
+            timeout: .seconds(30))
+        #expect(mine.text.contains("username=x-access-token\n"))
+        #expect(mine.text.contains("password=\(Self.token)\n"))
+        #expect(!FileManager.default.fileExists(atPath: userMarker.path), "the user's helper ran for the profile's host")
+        let traced = try String(contentsOf: trace, encoding: .utf8)
+        #expect(traced.contains("run_command"), "positive control: the trace lists the helper's command")
+        #expect(!traced.contains(Self.token), "the token is in an argument")
+
+        let other = try await sandbox.runner.run(
+            fill, cwd: sandbox.root, env: env, stdin: Data("protocol=https\nhost=other.histq.invalid\n\n".utf8),
+            timeout: .seconds(30), allowedExitCodes: Set(0...255))
+        #expect(!other.text.contains(Self.token) && !other.stderrTail.contains(Self.token))
+        // A token-carrying command resets every helper: the user's own would run with HISTQ_GIT_TOKEN in its
+        // environment (another host is only reached after a redirect; the gate let no other URL through).
+        #expect(!other.text.contains("password="), "a helper answered for another host")
+        #expect(!FileManager.default.fileExists(atPath: userMarker.path), "the user's helper ran")
+    }
+
+    @Test(
+        "a host that could widen or bend the config key, or a token that could break the helper, adds nothing",
+        arguments: [
+            ("*.histq.invalid", token), ("histq.invalid/x", token), ("user@histq.invalid", token),
+            ("histq .invalid", token), ("histq.invalid\n", token), (tokenHost, "two words"),
+            (tokenHost, "tok\nhost=evil.invalid"), (tokenHost, #"tok\nhost=evil.invalid"#), (tokenHost, ""),
+        ])
+    func unsafeHostOrTokenAddsNothing(host: String, token: String) {
+        var profile = Self.tokenProfile
+        profile.github = .init(host: host, login: "octo")
+        let env = GitInvocation.environment(profile: profile, base: [:], access: .network(.fetch), token: token)
+        #expect(env["HISTQ_GIT_TOKEN"] == nil)
+        #expect(!Self.configEntries(env).contains { $0.hasPrefix("credential.") })
+    }
+
+    @Test("the background fetch adds the token helper after its reset and the user's replayed helpers")
+    func backgroundFetchCarriesTokenHelperLast() async throws {
+        let sandbox = try await Sandbox()
+        defer { sandbox.remove() }
+        let (base, _, userHelper) = try Self.baseWithUserHelper(sandbox)
+        let repo = try await sandbox.makeRepo("repo")
+        try await sandbox.git(["remote", "add", "origin", "https://\(Self.tokenHost)/octo/repo.git"], in: repo)
+
+        let env = try await GitInvocation.backgroundFetchEnvironment(
+            profile: Self.tokenProfile, base: base, runner: sandbox.runner, cwd: repo, token: Self.token)
+        let entries = Self.configEntries(env)
+        let reset = try #require(entries.lastIndex(of: "credential.helper="))
+        let replayed = try #require(entries.lastIndex(of: "credential.helper=\(userHelper)"))
+        #expect(reset < replayed)
+        #expect(entries.suffix(2) == [
+            "\(Self.tokenHelperKey)=", "\(Self.tokenHelperKey)=\(GitInvocation.tokenHelper)",
+        ])
+        #expect(env["HISTQ_GIT_TOKEN"] == Self.token)
+        #expect(env["GIT_ALLOW_PROTOCOL"] == "https")
+        let filled = try await sandbox.runner.run(
+            ["credential", "fill"], cwd: repo, env: env,
+            stdin: Data("protocol=https\nhost=\(Self.tokenHost)\n\n".utf8), timeout: .seconds(30))
+        #expect(filled.text.contains("password=\(Self.token)\n"))
+
+        let withoutToken = try await GitInvocation.backgroundFetchEnvironment(
+            profile: Self.tokenProfile, base: base, runner: sandbox.runner, cwd: repo)
+        #expect(withoutToken["HISTQ_GIT_TOKEN"] == nil)
+        #expect(!Self.configEntries(withoutToken).contains { $0.hasPrefix(Self.tokenHelperKey) })
+
+        // `fetch --all` also contacts a remote on another host: the gate keeps the token back.
+        try await sandbox.git(["remote", "add", "other", "https://other.histq.invalid/octo/repo.git"], in: repo)
+        let mixed = try await GitInvocation.backgroundFetchEnvironment(
+            profile: Self.tokenProfile, base: base, runner: sandbox.runner, cwd: repo, token: Self.token)
+        #expect(mixed["HISTQ_GIT_TOKEN"] == nil)
+        #expect(mixed["GIT_ALLOW_PROTOCOL"] == "ssh:https:git")
+    }
+
     // MARK: - Harness
 
     typealias Command = @Sendable (Built) -> [String]

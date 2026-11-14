@@ -1,0 +1,176 @@
+// The parts of GitHub's REST v3 JSON that Histq shows. Requests ask for `application/vnd.github.full+json`, so
+// bodies come as markdown (`body`) and as GitHub's sanitized HTML (`body_html`). States stay strings: GitHub adds
+// values over time, and an unknown one must not make a whole list fail to decode. Dates are ISO 8601.
+import Foundation
+
+public struct GitHubUser: Codable, Sendable, Equatable {
+    public var id: Int
+    public var login: String
+    public var avatarURL: String?
+    public var htmlURL: String?
+    /// Only `GET /user` and single-user requests have it.
+    public var name: String?
+
+    public init(id: Int, login: String, avatarURL: String? = nil, htmlURL: String? = nil, name: String? = nil) {
+        self.id = id
+        self.login = login
+        self.avatarURL = avatarURL
+        self.htmlURL = htmlURL
+        self.name = name
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, login, name
+        case avatarURL = "avatar_url"
+        case htmlURL = "html_url"
+    }
+}
+
+public struct GitHubLabel: Codable, Sendable, Equatable {
+    public var name: String
+    /// `RRGGBB` without `#`.
+    public var color: String?
+    public var description: String?
+}
+
+/// One end of a pull request: the branch and the commit it points at.
+public struct GitHubBranchRef: Codable, Sendable, Equatable {
+    /// `owner:branch`.
+    public var label: String?
+    public var ref: String
+    public var sha: String
+}
+
+public struct GitHubPullRequest: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var number: Int
+    public var title: String
+    /// `open` or `closed` (a merged pull request is `closed` with `mergedAt` set).
+    public var state: String
+    public var draft: Bool?
+    public var user: GitHubUser?
+    public var body: String?
+    public var bodyHTML: String?
+    public var htmlURL: String
+    public var head: GitHubBranchRef
+    public var base: GitHubBranchRef
+    public var labels: [GitHubLabel]?
+    public var assignees: [GitHubUser]?
+    public var requestedReviewers: [GitHubUser]?
+    public var createdAt: Date?
+    public var updatedAt: Date?
+    public var mergedAt: Date?
+    /// Only a single pull request (`GET .../pulls/<n>`) has these.
+    public var merged: Bool?
+    public var mergeable: Bool?
+    public var commits: Int?
+    public var additions: Int?
+    public var deletions: Int?
+    public var changedFiles: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, number, title, state, draft, user, body, head, base, labels, assignees, merged, mergeable
+        case commits, additions, deletions
+        case bodyHTML = "body_html"
+        case htmlURL = "html_url"
+        case requestedReviewers = "requested_reviewers"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case mergedAt = "merged_at"
+        case changedFiles = "changed_files"
+    }
+}
+
+public struct GitHubIssue: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var number: Int
+    public var title: String
+    /// `open` or `closed`.
+    public var state: String
+    public var user: GitHubUser?
+    public var body: String?
+    public var bodyHTML: String?
+    public var htmlURL: String
+    public var labels: [GitHubLabel]?
+    public var assignees: [GitHubUser]?
+    /// The number of comments.
+    public var comments: Int?
+    public var createdAt: Date?
+    public var updatedAt: Date?
+    public var closedAt: Date?
+    /// Set when this "issue" is a pull request (GitHub's issue lists include them).
+    public var pullRequest: PullRequestLink?
+
+    public struct PullRequestLink: Codable, Sendable, Equatable {
+        public var url: String?
+    }
+
+    public var isPullRequest: Bool { pullRequest != nil }
+
+    enum CodingKeys: String, CodingKey {
+        case id, number, title, state, user, body, labels, assignees, comments
+        case bodyHTML = "body_html"
+        case htmlURL = "html_url"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case closedAt = "closed_at"
+        case pullRequest = "pull_request"
+    }
+}
+
+/// A conversation comment of an issue or a pull request.
+public struct GitHubComment: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var user: GitHubUser?
+    public var body: String?
+    public var bodyHTML: String?
+    public var htmlURL: String?
+    public var createdAt: Date?
+    public var updatedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id, user, body
+        case bodyHTML = "body_html"
+        case htmlURL = "html_url"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct GitHubReview: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var user: GitHubUser?
+    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`.
+    public var state: String
+    public var body: String?
+    public var bodyHTML: String?
+    public var htmlURL: String?
+    public var submittedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id, user, state, body
+        case bodyHTML = "body_html"
+        case htmlURL = "html_url"
+        case submittedAt = "submitted_at"
+    }
+}
+
+public struct GitHubCheckRun: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var name: String
+    /// `queued`, `in_progress` or `completed` (and a few newer waiting states).
+    public var status: String
+    /// Set once completed: `success`, `failure`, `neutral`, `cancelled`, `skipped`, `timed_out`,
+    /// `action_required`...
+    public var conclusion: String?
+    public var htmlURL: String?
+    public var startedAt: Date?
+    public var completedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, status, conclusion
+        case htmlURL = "html_url"
+        case startedAt = "started_at"
+        case completedAt = "completed_at"
+    }
+}

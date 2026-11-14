@@ -264,8 +264,13 @@ final class WelcomeModel {
     ) async throws {
         let toolchain = try await GitToolchain.resolve()
         let runner = GitRunner(executable: toolchain.executable.url)
-        let writeEnv = GitInvocation.environment(profile: nil, base: await GitToolchain.writeBase(), access: .write)
-        try await GitOperations.clone(url: url, into: destination, runner: runner, env: writeEnv, progress: progress)
+        // The clone opens with the default profile, as a new tab does: it clones as that profile too (SSH key) and,
+        // when the URL (after the user's rewrites) is https on the profile's GitHub host, with its token.
+        let profile = await ProfileLibrary.shared.loaded()?.defaultProfile
+        let token = await GitHubTokens.token(for: profile)
+        let cloneEnv = await GitInvocation.cloneEnvironment(
+            url: url, profile: profile, base: await GitToolchain.writeBase(), token: token, runner: runner)
+        try await GitOperations.clone(url: url, into: destination, runner: runner, env: cloneEnv, progress: progress)
     }
 
     /// A short message for a failed clone or init: git's last error line.

@@ -11,6 +11,9 @@
 // `stash@{n}` is built from an `Int`. Merge, pull and revert pass `--no-edit`; continue/abort/skip run
 // with `-c core.editor=true`, so git never waits for an editor.
 //
+// Token: with a `credential`, each network operation asks `GitInvocation.networkToken` first (inside its lane, for
+// the remotes it contacts) and gets the GitHub token only when the gate lets it; see `networkExec`.
+//
 // Undo: with a `journal`, the operations the journal can take back (commit, amend, checkout, reset, merge, rebase,
 // cherry-pick, revert, local branch create/delete/rename, discard) are snapshotted before and after inside their
 // own lane, so no other write can slip in between; `undo()` and `redo()` move between those snapshots.
@@ -41,6 +44,25 @@ public enum GitOperationError: Error, Equatable, Sendable {
     case currentWorktree(String)
 }
 
+/// A network command that failed to sign in after the token gate kept the GitHub token back for `reason`; `error` is
+/// git's own failure.
+public struct NetworkTokenWithheld: Error, Equatable, Sendable {
+    public enum Reason: Equatable, Sendable {
+        /// The repository's own config sets these network keys.
+        case repoNetworkConfig(keys: [String])
+        /// The repository has submodules and these recursion keys are on.
+        case submoduleRecursion(keys: [String])
+    }
+
+    public let reason: Reason
+    public let error: GitError
+
+    public init(reason: Reason, error: GitError) {
+        self.reason = reason
+        self.error = error
+    }
+}
+
 public struct GitOperations: Sendable {
     public enum ResetMode: String, Sendable { case soft, mixed, hard }
 
@@ -58,14 +80,29 @@ public struct GitOperations: Sendable {
         case profileDefault, sign, noSign
     }
 
+    /// The profile's GitHub token and what the token gate needs to decide, command by command, whether git gets it.
+    public struct NetworkCredential: Sendable {
+        public var profile: Profile?
+        public var base: [String: String]
+        public var token: String
+
+        public init(profile: Profile?, base: [String: String], token: String) {
+            self.profile = profile
+            self.base = base
+            self.token = token
+        }
+    }
+
     public let runner: GitRunner
     /// The worktree the operations run in.
     public let cwd: URL
     /// The write environment (`GitInvocation.environment(profile:base:)`): identity, signing, ssh.
     public let env: [String: String]
-    /// The environment of network operations (fetch, pull, push and their compound steps). Defaults to
-    /// `env`; a caller adds network-only settings (credentials) here.
+    /// The environment of network operations (fetch, pull, push and their compound steps) that do not get the
+    /// token. Defaults to `env`.
     public let networkEnv: [String: String]
+    /// The token for network operations that pass the gate (`networkExec`); nil = never a token.
+    public let credential: NetworkCredential?
     /// The time limit of one network command (git is stopped after it).
     public let networkTimeout: Duration
     /// Records the undoable operations of this worktree; nil = no undo.
@@ -73,14 +110,27 @@ public struct GitOperations: Sendable {
 
     public init(
         runner: GitRunner, cwd: URL, env: [String: String], networkEnv: [String: String]? = nil,
-        networkTimeout: Duration = .seconds(600), journal: UndoJournal? = nil
+        credential: NetworkCredential? = nil, networkTimeout: Duration = .seconds(600), journal: UndoJournal? = nil
     ) {
         self.runner = runner
         self.cwd = cwd
         self.env = env
         self.networkEnv = networkEnv ?? env
+        self.credential = credential
         self.networkTimeout = networkTimeout
         self.journal = journal
+    }
+
+    /// The usual setup for `profile`: `env` (and `networkEnv`) is its write environment, and `token` goes only to the
+    /// network operations the gate lets have it.
+    public init(
+        runner: GitRunner, cwd: URL, profile: Profile?, base: [String: String], token: String? = nil,
+        networkTimeout: Duration = .seconds(600), journal: UndoJournal? = nil
+    ) {
+        self.init(
+            runner: runner, cwd: cwd, env: GitInvocation.environment(profile: profile, base: base, access: .write),
+            credential: token.map { NetworkCredential(profile: profile, base: base, token: $0) },
+            networkTimeout: networkTimeout, journal: journal)
     }
 
     // MARK: - Checkout
@@ -196,18 +246,92 @@ public struct GitOperations: Sendable {
 
     // MARK: - Fetch, pull, push
 
+    /// `fetch --all`, with the token only when every remote passes the gate (all or nothing: fetching the remotes
+    /// in two groups would mean redoing `skipFetchAll`, remote groups and partial failures); otherwise without it.
     public func fetchAll(prune: Bool = true) async throws {
-        try await write(["fetch", "--all"] + (prune ? ["--prune"] : []), network: true)
+        try await lane { ops in
+            // Listed for the gate alone: without a token it has nothing to decide.
+            let remotes = ops.credential == nil
+                ? []
+                : try? await GitInvocation.remoteNames(runner: ops.runner, cwd: ops.cwd, env: ops.env)
+            try await ops.networkExec(
+                ["fetch", "--all"] + (prune ? ["--prune"] : []), target: remotes.map { .fetch(remotes: $0) })
+        }
     }
 
-    /// Pulls the current branch's upstream.
+    /// Pulls the current branch's upstream. With the token, it is split so that only the fetch carries it: a
+    /// hardened `fetch <remote>` (which marks the upstream for merge in FETCH_HEAD, as `pull` does), then, with the
+    /// write environment and the repo's hooks as usual, `merge FETCH_HEAD` with the mode's flags (pull's own merge
+    /// message), or for a rebase what `pull --rebase` runs: `rebase --onto <fetched> <fork point>`, the fetched
+    /// commit being FETCH_HEAD's for-merge one (not `@{upstream}`, which a refspec may not map, as for a
+    /// `refs/pull/<n>/head` checkout, or may leave stale) and the fork point `merge-base --fork-point @{upstream}
+    /// HEAD` taken before the fetch, else the fetched commit itself. Without the token (an upstream on another
+    /// host, a local one, none at all) it is one `git pull`, as before.
     public func pull(_ mode: PullMode) async throws {
         let flags: [String] = switch mode {
         case .fastForward: ["--no-rebase", "--ff", "--no-edit"]
         case .fastForwardOnly: ["--no-rebase", "--ff-only"]
         case .rebase: ["--rebase"]
         }
-        try await write(["pull"] + flags, network: true)
+        try await lane { ops in
+            let remote = ops.credential == nil ? nil : try? await ops.upstreamRemote()
+            let decision = await ops.tokenDecision(for: remote.map { .fetch(remotes: [$0]) })
+            guard decision == .attach, let remote, let credential = ops.credential else {
+                try await ops.withheldExec(decision) { try await ops.exec(["pull"] + flags, network: true) }
+                return
+            }
+            // As `pull`, before the fetch moves the tracking ref; nil without one or without a fork point.
+            let forkPoint = mode == .rebase ? await ops.forkPoint() : nil
+            try await ops.exec(
+                ["fetch", "--end-of-options", remote], network: true,
+                environment: ops.tokenEnvironment(.fetch, credential))
+            let candidates = try await ops.mergeCandidates()
+            switch mode {
+            case .fastForward: try await ops.exec(["merge", "--ff", "--no-edit", "FETCH_HEAD"])
+            case .fastForwardOnly: try await ops.exec(["merge", "--ff-only", "FETCH_HEAD"])
+            case .rebase:
+                guard candidates.count == 1, let fetched = candidates.first else {
+                    throw GitError.other(exit: 1, stderrTail: "Cannot rebase onto multiple branches.")
+                }
+                try await ops.exec(["rebase", "--onto", fetched, forkPoint ?? fetched])
+            }
+        }
+    }
+
+    /// The object ids the fetch marked for merge in FETCH_HEAD. Fails as `git pull` does when there is none (the
+    /// upstream branch was deleted on the remote, or no `branch.<name>.merge`).
+    private func mergeCandidates() async throws -> [String] {
+        let path = try await runner.run(
+            ["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"], cwd: cwd, env: env).text
+        let fetchHead = (try? String(contentsOfFile: path.trimmingCharacters(in: .newlines), encoding: .utf8)) ?? ""
+        // `<oid>\t<empty or not-for-merge>\t<description>` per line.
+        let candidates = fetchHead.split(separator: "\n").compactMap { line -> String? in
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 2, fields[1].isEmpty, Self.isObjectID(String(fields[0])) else { return nil }
+            return String(fields[0])
+        }
+        guard candidates.isEmpty else { return candidates }
+        throw GitError.other(
+            exit: 1, stderrTail: "Your configuration specifies a branch to merge from the remote, but no such ref "
+                + "was fetched.")
+    }
+
+    /// `merge-base --fork-point @{upstream} HEAD`, as `pull --rebase` computes it; nil when the upstream is not a
+    /// tracking ref (git cannot resolve `@{upstream}`) or has no fork point, and `pull` then rebases from the fetched
+    /// commit too.
+    private func forkPoint() async -> String? {
+        let result = try? await runner.run(
+            ["merge-base", "--fork-point", "@{upstream}", "HEAD"], cwd: cwd, env: env, allowedExitCodes: [0, 1, 128])
+        let text = result?.exitCode == 0 ? result?.text.trimmingCharacters(in: .newlines) : nil
+        return text.flatMap { Self.isObjectID($0) ? $0 : nil }
+    }
+
+    /// The remote `pull` fetches from: `branch.<current branch>.remote`. Throws on a detached HEAD or without one.
+    private func upstreamRemote() async throws -> String {
+        let branch = try await runner.run(["symbolic-ref", "--short", "-q", "HEAD"], cwd: cwd, env: env).text
+            .trimmingCharacters(in: .newlines)
+        return try await runner.run(["config", "--get", "branch.\(branch).remote"], cwd: cwd, env: env).text
+            .trimmingCharacters(in: .newlines)
     }
 
     /// Pushes the local `branch` to `remoteBranch` (default: the same name) on `remote`. `setUpstream`
@@ -225,12 +349,17 @@ public struct GitOperations: Sendable {
             guard Self.isObjectID(expected) else { throw GitOperationError.invalidObjectID(expected) }
             args.append("--force-with-lease=\(target):\(expected)")
         }
-        try await write(args + ["--end-of-options", remote, "refs/heads/\(branch):\(target)"], network: true)
+        try await push(args + ["--end-of-options", remote, "refs/heads/\(branch):\(target)"], to: remote)
     }
 
     /// Mirrors every ref to `remote` (`push --mirror`: deletes remote refs missing here). The caller confirms.
     public func pushMirror(to remote: String) async throws {
-        try await write(["push", "--mirror", "--end-of-options", remote], network: true)
+        try await push(["push", "--mirror", "--end-of-options", remote], to: remote)
+    }
+
+    /// One push to `remote` in the lane, through the token gate.
+    private func push(_ args: [String], to remote: String) async throws {
+        try await lane { ops in try await ops.networkExec(args, target: .push(remote: remote)) }
     }
 
     // MARK: - Branches
@@ -270,15 +399,16 @@ public struct GitOperations: Sendable {
     public func renameRemoteBranch(_ name: String, to newName: String, on remote: String) async throws {
         try await validateBranchName(newName)
         try await lane { ops in
-            try await ops.exec(
+            try await ops.networkExec(
                 ["push", "--end-of-options", remote, "refs/remotes/\(remote)/\(name):refs/heads/\(newName)"],
-                network: true)
-            try await ops.exec(["push", "--end-of-options", remote, ":refs/heads/\(name)"], network: true)
+                target: .push(remote: remote))
+            try await ops.networkExec(
+                ["push", "--end-of-options", remote, ":refs/heads/\(name)"], target: .push(remote: remote))
         }
     }
 
     public func deleteRemoteBranch(_ name: String, on remote: String) async throws {
-        try await write(["push", "--end-of-options", remote, ":refs/heads/\(name)"], network: true)
+        try await push(["push", "--end-of-options", remote, ":refs/heads/\(name)"], to: remote)
     }
 
     /// Sets the upstream of `branch` to `upstream` (e.g. `origin/main`).
@@ -547,19 +677,19 @@ public struct GitOperations: Sendable {
     }
 
     public func pushTag(_ name: String, to remote: String) async throws {
-        try await write(["push", "--end-of-options", remote, "refs/tags/\(name):refs/tags/\(name)"], network: true)
+        try await push(["push", "--end-of-options", remote, "refs/tags/\(name):refs/tags/\(name)"], to: remote)
     }
 
     public func deleteRemoteTag(_ name: String, on remote: String) async throws {
-        try await write(["push", "--end-of-options", remote, ":refs/tags/\(name)"], network: true)
+        try await push(["push", "--end-of-options", remote, ":refs/tags/\(name)"], to: remote)
     }
 
     // MARK: - Clone and init
 
     /// Clones `url` into `destination` (which must not exist; its parent must), reporting git's
-    /// `--progress` lines (stderr, split on `\r` and `\n`) as they arrive. `env` is the write environment
-    /// plus any network settings. Cancelling the task stops git, and so does `timeout` (1 h by default;
-    /// nil = no limit, for huge repos).
+    /// `--progress` lines (stderr, split on `\r` and `\n`) as they arrive. `env` is
+    /// `GitInvocation.cloneEnvironment(url:profile:base:token:runner:)`. Cancelling the task stops git, and so does
+    /// `timeout` (1 h by default; nil = no limit, for huge repos).
     public static func clone(
         url: String, into destination: URL, runner: GitRunner, env: [String: String],
         timeout: Duration? = .seconds(3600),
@@ -749,14 +879,71 @@ public struct GitOperations: Sendable {
     }
 
     /// Runs one command without taking the lane: only call it from inside `lane`. `extraEnv` adds to the
-    /// environment of this one command (the interactive rebase's sequence editor).
+    /// environment of this one command (the interactive rebase's sequence editor); `environment` replaces it (a
+    /// token-carrying command).
     @discardableResult
     func exec(
         _ args: [String], stdin: Data? = nil, network: Bool = false, allowedExitCodes: Set<Int32> = [0],
-        extraEnv: [String: String] = [:]
+        extraEnv: [String: String] = [:], environment: [String: String]? = nil
     ) async throws -> GitResult {
         try await runner.run(
-            args, cwd: cwd, env: (network ? networkEnv : env).merging(extraEnv) { $1 }, stdin: stdin,
+            args, cwd: cwd, env: (environment ?? (network ? networkEnv : env)).merging(extraEnv) { $1 }, stdin: stdin,
             timeout: network ? networkTimeout : nil, allowedExitCodes: allowedExitCodes)
+    }
+
+    // MARK: - Token
+
+    /// Runs one network command (inside the lane). The gate decides first: with `.attach` (every URL `target`
+    /// contacts is `https://<profile host>/…` and the repo sets no network key) git gets the token in the hardened
+    /// `.network` environment, with no hook at all for a fetch. A push keeps the repo's pre-push hook, run without
+    /// the token by a wrapper (`GitInvocation.prePushHooksFolder`), unless it is git-lfs's stub, whose upload needs
+    /// it. Anything else runs with `networkEnv` and no token. A nil `target` (git could not list the remotes) is no
+    /// token.
+    @discardableResult
+    func networkExec(_ args: [String], target: GitInvocation.NetworkTarget?) async throws -> GitResult {
+        let decision = await tokenDecision(for: target)
+        guard decision == .attach, let credential else {
+            return try await withheldExec(decision) { try await exec(args, network: true) }
+        }
+        guard case .push = target else {
+            return try await exec(args, network: true, environment: tokenEnvironment(.fetch, credential))
+        }
+        // The write environment of the credential's profile: where git finds the hook, and what the hook sees.
+        let hookEnv = GitInvocation.environment(profile: credential.profile, base: credential.base, access: .write)
+        let hooks = try await GitInvocation.prePushHooksFolder(runner: runner, cwd: cwd, env: hookEnv)
+        defer { try? FileManager.default.removeItem(at: hooks) }
+        return try await exec(
+            args, network: true, environment: tokenEnvironment(.push(hooksPath: hooks.path), credential))
+    }
+
+    func tokenDecision(for target: GitInvocation.NetworkTarget?) async -> GitInvocation.TokenDecision {
+        guard let credential else { return .noToken }
+        guard let target else { return .lookupFailed }
+        return await GitInvocation.networkToken(
+            for: target, profile: credential.profile, token: credential.token, base: credential.base, runner: runner,
+            cwd: cwd)
+    }
+
+    func tokenEnvironment(_ kind: GitInvocation.NetworkKind, _ credential: NetworkCredential) -> [String: String] {
+        GitInvocation.environment(
+            profile: credential.profile, base: credential.base, access: .network(kind), token: credential.token)
+    }
+
+    /// Runs a network command that did not get the token; when the repo's own network config or its submodule
+    /// recursion kept it back and git then could not sign in, throws `NetworkTokenWithheld` so the message can say why.
+    func withheldExec<T: Sendable>(_ decision: GitInvocation.TokenDecision, _ body: () async throws -> T)
+        async throws -> T
+    {
+        do {
+            return try await body()
+        } catch let error as GitError {
+            guard case .auth = error else { throw error }
+            switch decision {
+            case .repoNetworkConfig(let keys): throw NetworkTokenWithheld(reason: .repoNetworkConfig(keys: keys), error: error)
+            case .submoduleRecursion(let keys):
+                throw NetworkTokenWithheld(reason: .submoduleRecursion(keys: keys), error: error)
+            case .attach, .noToken, .otherURL, .lookupFailed: throw error
+            }
+        }
     }
 }
